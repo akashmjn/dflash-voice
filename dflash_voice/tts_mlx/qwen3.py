@@ -22,7 +22,7 @@ Reference model: ``mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit``
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generator, List, Optional, Tuple
 
 import mlx.core as mx
@@ -49,6 +49,21 @@ def _format_duration(seconds: float) -> str:
 
 
 @dataclass
+class FrameTiming:
+    frame_idx: int
+    backbone_s: float
+    depth_s: float
+    total_s: float
+
+
+@dataclass
+class GenerationProfile:
+    frame_timings: List[FrameTiming] = field(default_factory=list)
+    codec_decode_s: float = 0.0
+    num_frames: int = 0
+
+
+@dataclass
 class GenerationResult:
     audio: mx.array
     samples: int
@@ -63,6 +78,7 @@ class GenerationResult:
     peak_memory_usage: float
     is_streaming_chunk: bool = False
     is_final_chunk: bool = False
+    profile: Optional[GenerationProfile] = None
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +366,7 @@ def _generate_codec_frames(
     repetition_penalty: float = 1.05,
     stream: bool = False,
     streaming_interval: float = 2.0,
+    profile: Optional[GenerationProfile] = None,
 ) -> Generator[Tuple[str, object], None, None]:
     """Autoregressively generate 16-codebook frames at ~12.5 Hz.
 
@@ -399,8 +416,11 @@ def _generate_codec_frames(
         yield ("stream", (audio_chunk, new_tokens, is_final))
 
     for step in range(max_tokens):
-        logits, h_t = model.talker(e_t, cache=backbone_cache)
+        if profile is not None:
+            t_step = time.perf_counter()
+            t0 = time.perf_counter()
 
+        logits, h_t = model.talker(e_t, cache=backbone_cache)
         s_t = _sample_codebook_token(
             logits,
             temperature=temperature,
@@ -411,6 +431,11 @@ def _generate_codec_frames(
             suppress_tokens=suppress_tokens,
             eos_token_id=eos_token_id,
         )
+
+        if profile is not None:
+            mx.eval(s_t, h_t)
+            backbone_s = time.perf_counter() - t0
+            t1 = time.perf_counter()
 
         is_eos = s_t[0, 0] == eos_token_id
 
@@ -424,6 +449,11 @@ def _generate_codec_frames(
             top_p=top_p,
         )
 
+        if profile is not None:
+            if a_t:
+                mx.eval(a_t[-1])
+            depth_s = time.perf_counter() - t1
+
         e_t, text_idx = _build_frame_embedding(
             model,
             s_t,
@@ -435,12 +465,25 @@ def _generate_codec_frames(
 
         mx.eval(e_t, is_eos)
 
+        if profile is not None:
+            total_s = time.perf_counter() - t_step
+
         if is_eos.item():
             break
 
         generated_token_ids.append(int(s_t[0, 0]))
         frame_t = mx.concatenate([s_t, *a_t], axis=1)
         generated_frames.append(frame_t)
+
+        if profile is not None:
+            profile.frame_timings.append(
+                FrameTiming(
+                    frame_idx=len(generated_frames) - 1,
+                    backbone_s=backbone_s,
+                    depth_s=depth_s,
+                    total_s=total_s,
+                )
+            )
 
         if stream:
             if len(generated_frames) - decoded_frames >= streaming_chunk_size:
@@ -498,6 +541,7 @@ def _make_result(
     start_time: float,
     is_streaming_chunk: bool = False,
     is_final_chunk: bool = False,
+    profile: Optional[GenerationProfile] = None,
 ) -> GenerationResult:
     elapsed = time.time() - start_time
     samples = int(audio.shape[0])
@@ -524,6 +568,7 @@ def _make_result(
         peak_memory_usage=mx.get_peak_memory() / 1e9,
         is_streaming_chunk=is_streaming_chunk,
         is_final_chunk=is_final_chunk,
+        profile=profile,
     )
 
 
@@ -556,6 +601,7 @@ class Qwen3TTS:
         repetition_penalty: float = 1.05,
         stream: bool = False,
         streaming_interval: float = 2.0,
+        profile: Optional[GenerationProfile] = None,
         **kwargs,
     ) -> Generator[GenerationResult, None, None]:
         """Generate speech from text using a Base preset voice."""
@@ -587,6 +633,8 @@ class Qwen3TTS:
             generated_frames: List[mx.array] = []
             chunk_start = start_time
 
+            segment_profile = profile if profile is not None and not stream else None
+
             for event, payload in _generate_codec_frames(
                 self._model,
                 prefill_embeds,
@@ -599,6 +647,7 @@ class Qwen3TTS:
                 repetition_penalty=repetition_penalty,
                 stream=stream,
                 streaming_interval=streaming_interval,
+                profile=segment_profile,
             ):
                 if event == "stream":
                     audio_chunk, new_tokens, is_final = payload
@@ -623,13 +672,21 @@ class Qwen3TTS:
             if not generated_frames:
                 continue
 
-            audio = _codec_decode_frames(self._model, generated_frames)
+            if segment_profile is not None:
+                t_decode = time.perf_counter()
+                audio = _codec_decode_frames(self._model, generated_frames)
+                segment_profile.codec_decode_s = time.perf_counter() - t_decode
+                segment_profile.num_frames = len(generated_frames)
+            else:
+                audio = _codec_decode_frames(self._model, generated_frames)
+
             yield _make_result(
                 self._model,
                 audio,
                 segment_idx=segment_idx,
                 token_count=len(generated_frames),
                 start_time=start_time,
+                profile=segment_profile,
             )
             mx.clear_cache()
 
