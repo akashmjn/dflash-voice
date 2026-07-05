@@ -1,0 +1,35 @@
+[project]
+name = "dflash-voice"
+version = "0.1.0"
+description = "DFlash Voice: Block Diffusion for Flash TTS Speculative Decoding"
+requires-python = ">=3.10"
+dependencies = [
+    "rich",
+    "loguru",
+    "numpy",
+    "tqdm",
+    "datasets",
+    "requests",
+    "huggingface-hub",
+]
+
+[tool.setuptools.packages.find]
+include = ["dflash*"]
+
+[project.optional-dependencies]
+tts_mlx = [
+    "mlx>=0.31.1",
+    "mlx-lm==0.31.1",
+    "mlx-audio==0.4.4",
+    "transformers==5.6.0",
+    "huggingface-hub==1.5.0",
+]
+
+dev = [
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: downloads models and runs end-to-end inference",
+]
