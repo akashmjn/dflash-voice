@@ -10,11 +10,11 @@ Ported from mlx-audio 0.4.4
 
 - ``Model._prepare_generation_inputs`` → ``_prepare_prompt``
   (``mlx_audio/tts/models/qwen3_tts/qwen3_tts.py``)
-- ``Model._sample_token`` / ``_apply_probability_filters`` → ``_sample_codec_token``
+- ``Model._sample_token`` / ``_apply_probability_filters`` → ``_sample_codebook_token``
 - Base ``Model.generate`` codec loop (talker + code predictor + streaming decode)
   → ``_generate_codec_frames``, ``Qwen3TTS.generate``
-- ``Model._decode_*`` / ``speech_tokenizer.decode`` → ``_decode_frames``,
-  ``_decode_stream_chunk``
+- ``Model._decode_*`` / ``speech_tokenizer.decode`` → ``_codec_decode_frames``,
+  ``_codec_decode_stream_chunk``
 
 Reference model: ``mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit``
 """
@@ -87,7 +87,7 @@ def _apply_probability_filters(
     return mx.where(logprobs == -mx.inf, -float("inf"), logits)
 
 
-def _sample_codec_token(
+def _sample_codebook_token(
     logits: mx.array,
     *,
     temperature: float = 0.9,
@@ -99,7 +99,7 @@ def _sample_codec_token(
     eos_token_id: Optional[int] = None,
     min_p: float = 0.0,
 ) -> mx.array:
-    """Sample one codec token from talker or code-predictor logits [1, seq, vocab]."""
+    """Sample s_t (codebook 0) from backbone or depth-decoder logits [1, seq, vocab]."""
     logits = logits[:, -1, :]
 
     if suppress_tokens:
@@ -122,9 +122,7 @@ def _sample_codec_token(
                 selected_logits * repetition_penalty,
                 selected_logits / repetition_penalty,
             )
-            logits = mx.put_along_axis(
-                logits, token_ids[None, :], penalized, axis=-1
-            )
+            logits = mx.put_along_axis(logits, token_ids[None, :], penalized, axis=-1)
 
     if temperature <= 0:
         return mx.argmax(logits, axis=-1, keepdims=True)
@@ -165,8 +163,8 @@ def _prepare_prompt(
 
     Returns:
         input_embeds: prefill sequence for the talker KV cache
-        trailing_text_hidden: one text embedding per codec frame
-        tts_pad_embed: padding embed after text is exhausted
+        text_stream: one text embedding per codec frame
+        text_pad_embed: padding embed after text is exhausted
     """
     if model.tokenizer is None:
         raise ValueError("Tokenizer not loaded")
@@ -246,9 +244,7 @@ def _prepare_prompt(
     role_embed = text_embed[:, :3, :]
 
     pad_count = codec_embed.shape[1] - 2
-    pad_embeds = mx.broadcast_to(
-        tts_pad_embed, (1, pad_count, tts_pad_embed.shape[-1])
-    )
+    pad_embeds = mx.broadcast_to(tts_pad_embed, (1, pad_count, tts_pad_embed.shape[-1]))
     combined_embed = mx.concatenate([pad_embeds, tts_bos_embed], axis=1)
     combined_embed = combined_embed + codec_embed[:, :-1, :]
 
@@ -256,12 +252,12 @@ def _prepare_prompt(
     first_text_embed = text_embed[:, 3:4, :] + codec_embed[:, -1:, :]
     input_embeds = mx.concatenate([input_embeds, first_text_embed], axis=1)
 
-    trailing_text_hidden = mx.concatenate(
+    text_stream = mx.concatenate(
         [text_embed[:, 4:-5, :], tts_eos_embed],
         axis=1,
     )
 
-    return input_embeds, trailing_text_hidden, tts_pad_embed
+    return input_embeds, text_stream, tts_pad_embed
 
 
 # ---------------------------------------------------------------------------
@@ -269,84 +265,83 @@ def _prepare_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _reset_code_cache(code_cache) -> None:
-    for cache in code_cache:
+def _reset_depth_cache(depth_cache) -> None:
+    for cache in depth_cache:
         cache.keys = None
         cache.values = None
         cache.offset = 0
 
 
-def _predict_code_group_tokens(
+def _depth_decode_audio_tokens(
     model,
-    first_token: mx.array,
-    hidden: mx.array,
-    code_cache,
+    s_t: mx.array,
+    h_t: mx.array,
+    depth_cache,
     *,
     temperature: float,
     top_k: int,
     top_p: float,
 ) -> List[mx.array]:
-    """Predict codebook tokens 1..N-1 given talker token 0 and last hidden state."""
+    """Predict a_t (codebooks 1..N-1) given semantic token s_t and backbone hidden h_t."""
     config = model.config.talker_config
-    code_tokens = [first_token]
-    code_hidden = hidden[:, -1:, :]
+    a_t: List[mx.array] = []
+    depth_hidden = h_t[:, -1:, :]
 
-    _reset_code_cache(code_cache)
+    _reset_depth_cache(depth_cache)
 
     for code_idx in range(config.num_code_groups - 1):
         if code_idx == 0:
-            code_0_embed = model.talker.get_input_embeddings()(first_token)
-            code_input = mx.concatenate([code_hidden, code_0_embed], axis=1)
+            s_embed = model.talker.get_input_embeddings()(s_t)
+            depth_input = mx.concatenate([depth_hidden, s_embed], axis=1)
         else:
-            code_input = model.talker.code_predictor.codec_embedding[code_idx - 1](
-                code_tokens[-1]
+            depth_input = model.talker.code_predictor.codec_embedding[code_idx - 1](
+                a_t[-1]
             )
 
-        code_logits, code_cache, _ = model.talker.code_predictor(
-            code_input,
-            cache=code_cache,
+        depth_logits, depth_cache, _ = model.talker.code_predictor(
+            depth_input,
+            cache=depth_cache,
             generation_step=code_idx,
         )
-        code_tokens.append(
-            _sample_codec_token(
-                code_logits,
+        a_t.append(
+            _sample_codebook_token(
+                depth_logits,
                 temperature=temperature,
                 top_k=top_k,
                 top_p=top_p,
             )
         )
 
-    return code_tokens
+    return a_t
 
 
-def _next_input_embeds(
+def _build_frame_embedding(
     model,
-    code_tokens: List[mx.array],
-    trailing_text_hidden: mx.array,
-    tts_pad_embed: mx.array,
-    trailing_idx: int,
+    s_t: mx.array,
+    a_t: List[mx.array],
+    text_stream: mx.array,
+    text_pad_embed: mx.array,
+    text_idx: int,
 ) -> Tuple[mx.array, int]:
-    """Combine next text token embedding with summed codec embeddings."""
-    if trailing_idx < trailing_text_hidden.shape[1]:
-        text_embed = trailing_text_hidden[:, trailing_idx : trailing_idx + 1, :]
-        trailing_idx += 1
+    """Build e_t = text_embed + embed(s_t) + sum(embed(a_i)) for the next backbone step."""
+    if text_idx < text_stream.shape[1]:
+        text_embed = text_stream[:, text_idx : text_idx + 1, :]
+        text_idx += 1
     else:
-        text_embed = tts_pad_embed
+        text_embed = text_pad_embed
 
-    codec_embed = model.talker.get_input_embeddings()(code_tokens[0])
-    for i, code in enumerate(code_tokens[1:]):
-        codec_embed = codec_embed + model.talker.code_predictor.codec_embedding[i](
-            code
-        )
+    codec_embed = model.talker.get_input_embeddings()(s_t)
+    for i, a_i in enumerate(a_t):
+        codec_embed = codec_embed + model.talker.code_predictor.codec_embedding[i](a_i)
 
-    return text_embed + codec_embed, trailing_idx
+    return text_embed + codec_embed, text_idx
 
 
 def _generate_codec_frames(
     model,
-    input_embeds: mx.array,
-    trailing_text_hidden: mx.array,
-    tts_pad_embed: mx.array,
+    prefill_embeds: mx.array,
+    text_stream: mx.array,
+    text_pad_embed: mx.array,
     *,
     max_tokens: int = 4096,
     temperature: float = 0.9,
@@ -359,8 +354,8 @@ def _generate_codec_frames(
     """Autoregressively generate 16-codebook frames at ~12.5 Hz.
 
     Yields:
-        ("stream", (audio_chunk, new_token_count, is_final)) for streaming vocoder chunks
-        ("done", generated_codes) when batch decode will follow
+        ("stream", (audio_chunk, new_token_count, is_final)) for streaming decode chunks
+        ("done", generated_frames) when batch decode will follow
     """
     if model.speech_tokenizer is None:
         raise ValueError("Speech tokenizer not loaded")
@@ -373,37 +368,40 @@ def _generate_codec_frames(
         if i != eos_token_id
     ]
 
-    talker_cache = model.talker.make_cache()
-    code_cache = model.talker.code_predictor.make_cache()
+    backbone_cache = model.talker.make_cache()
+    depth_cache = model.talker.code_predictor.make_cache()
     generated_token_ids: List[int] = []
-    generated_codes: List[mx.array] = []
-    trailing_idx = 0
+    generated_frames: List[mx.array] = []
+    text_idx = 0
+    e_t = prefill_embeds
 
     streaming_chunk_size = max(1, int(streaming_interval * 12.5))
-    decoded_tokens = 0
+    decoded_frames = 0
 
     if stream:
         model.speech_tokenizer.decoder.reset_streaming_state()
 
     def _maybe_emit_stream(is_final: bool = False):
-        nonlocal decoded_tokens
+        nonlocal decoded_frames
         if not stream:
             return
-        pending = len(generated_codes) - decoded_tokens
+        pending = len(generated_frames) - decoded_frames
         if pending <= 0:
             return
         if not is_final and pending < streaming_chunk_size:
             return
 
         new_tokens = pending
-        audio_chunk = _decode_stream_chunk(model, generated_codes[decoded_tokens:])
-        decoded_tokens = len(generated_codes)
+        audio_chunk = _codec_decode_stream_chunk(
+            model, generated_frames[decoded_frames:]
+        )
+        decoded_frames = len(generated_frames)
         yield ("stream", (audio_chunk, new_tokens, is_final))
 
     for step in range(max_tokens):
-        logits, hidden = model.talker(input_embeds, cache=talker_cache)
+        logits, h_t = model.talker(e_t, cache=backbone_cache)
 
-        next_token = _sample_codec_token(
+        s_t = _sample_codebook_token(
             logits,
             temperature=temperature,
             top_k=top_k,
@@ -414,36 +412,38 @@ def _generate_codec_frames(
             eos_token_id=eos_token_id,
         )
 
-        is_eos = next_token[0, 0] == eos_token_id
+        is_eos = s_t[0, 0] == eos_token_id
 
-        code_tokens = _predict_code_group_tokens(
+        a_t = _depth_decode_audio_tokens(
             model,
-            next_token,
-            hidden,
-            code_cache,
+            s_t,
+            h_t,
+            depth_cache,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
         )
 
-        input_embeds, trailing_idx = _next_input_embeds(
+        e_t, text_idx = _build_frame_embedding(
             model,
-            code_tokens,
-            trailing_text_hidden,
-            tts_pad_embed,
-            trailing_idx,
+            s_t,
+            a_t,
+            text_stream,
+            text_pad_embed,
+            text_idx,
         )
 
-        mx.eval(input_embeds, is_eos)
+        mx.eval(e_t, is_eos)
 
         if is_eos.item():
             break
 
-        generated_token_ids.append(int(next_token[0, 0]))
-        generated_codes.append(mx.concatenate(code_tokens, axis=1))
+        generated_token_ids.append(int(s_t[0, 0]))
+        frame_t = mx.concatenate([s_t, *a_t], axis=1)
+        generated_frames.append(frame_t)
 
         if stream:
-            if len(generated_codes) - decoded_tokens >= streaming_chunk_size:
+            if len(generated_frames) - decoded_frames >= streaming_chunk_size:
                 yield from _maybe_emit_stream(is_final=False)
                 mx.clear_cache()
         elif step > 0 and step % 50 == 0:
@@ -453,20 +453,20 @@ def _generate_codec_frames(
         yield from _maybe_emit_stream(is_final=True)
         model.speech_tokenizer.decoder.reset_streaming_state()
     else:
-        yield ("done", generated_codes)
+        yield ("done", generated_frames)
 
 
 # ---------------------------------------------------------------------------
-# Vocoder decode
+# Codec decode (frames → waveform)
 # ---------------------------------------------------------------------------
 
 
-def _decode_frames(model, generated_codes: List[mx.array]) -> mx.array:
+def _codec_decode_frames(model, generated_frames: List[mx.array]) -> mx.array:
     """Decode stacked codec frames to a 24 kHz waveform."""
-    if not generated_codes:
+    if not generated_frames:
         return mx.zeros((0,), dtype=mx.float32)
 
-    codes = mx.stack(generated_codes, axis=1)
+    codes = mx.stack(generated_frames, axis=1)
     audio, audio_lengths = model.speech_tokenizer.decode(codes)
     audio = audio[0]
 
@@ -478,7 +478,7 @@ def _decode_frames(model, generated_codes: List[mx.array]) -> mx.array:
     return audio
 
 
-def _decode_stream_chunk(model, frames: List[mx.array]) -> mx.array:
+def _codec_decode_stream_chunk(model, frames: List[mx.array]) -> mx.array:
     codes_chunk = mx.stack(frames, axis=1)
     codes_for_decoder = mx.transpose(codes_chunk, (0, 2, 1))
     mx.eval(codes_for_decoder)
@@ -562,9 +562,7 @@ class Qwen3TTS:
         del kwargs
 
         if getattr(self._model.config, "tts_model_type", "base") != "base":
-            raise ValueError(
-                "Qwen3TTS wrapper supports Base preset-voice models only"
-            )
+            raise ValueError("Qwen3TTS wrapper supports Base preset-voice models only")
 
         if self._model.speech_tokenizer is None:
             raise ValueError("Speech tokenizer not loaded")
@@ -579,21 +577,21 @@ class Qwen3TTS:
         for segment_idx, segment_text in enumerate(segments):
             start_time = time.time()
 
-            input_embeds, trailing_text, pad_embed = _prepare_prompt(
+            prefill_embeds, text_stream, text_pad_embed = _prepare_prompt(
                 self._model,
                 segment_text,
                 voice=voice,
                 language=lang,
             )
 
-            generated_codes: List[mx.array] = []
+            generated_frames: List[mx.array] = []
             chunk_start = start_time
 
             for event, payload in _generate_codec_frames(
                 self._model,
-                input_embeds,
-                trailing_text,
-                pad_embed,
+                prefill_embeds,
+                text_stream,
+                text_pad_embed,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 top_k=top_k,
@@ -617,20 +615,20 @@ class Qwen3TTS:
                     if is_final:
                         mx.clear_cache()
                 elif event == "done":
-                    generated_codes = payload
+                    generated_frames = payload
 
             if stream:
                 continue
 
-            if not generated_codes:
+            if not generated_frames:
                 continue
 
-            audio = _decode_frames(self._model, generated_codes)
+            audio = _codec_decode_frames(self._model, generated_frames)
             yield _make_result(
                 self._model,
                 audio,
                 segment_idx=segment_idx,
-                token_count=len(generated_codes),
+                token_count=len(generated_frames),
                 start_time=start_time,
             )
             mx.clear_cache()
