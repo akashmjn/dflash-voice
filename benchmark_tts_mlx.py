@@ -12,46 +12,63 @@ from pathlib import Path
 from rich import print
 from tqdm import tqdm
 
-DEFAULT_MODELS = {
-    "qwen3": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
-    "fish": "mlx-community/fish-audio-s2-pro-8bit",
-}
-
 DEFAULT_OUTPUT_DIR = Path("benchmark")
 
-QWEN3_PROMPTS = [
-    "Hello.",
-    "Hello, this is a quick Qwen3 TTS test on Apple Silicon.",
-    "The price is $42.99 — call 555-0123 today!",
-    "What is the capital of France, and why is it historically significant?",
-    (
-        "The quick brown fox jumps over the lazy dog. "
-        "Speech synthesis on Apple Silicon should feel fast and natural."
-    ),
-    (
-        "In a world where artificial intelligence transforms how we communicate, "
-        "voice synthesis stands at the frontier of human-computer interaction. "
-        "Real-time text-to-speech enables assistants, accessibility tools, and "
-        "creative applications that were unimaginable a decade ago."
-    ),
-]
+BACKENDS = {
+    "qwen3": {
+        "model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+        "voice": "Ryan",
+        "language": "auto",
+        "warmup": "Hi.",
+        "temperature": 0.9,
+        "top_k": 50,
+        "top_p": 1.0,
+        "max_tokens": 1024,
+    },
+    "fish": {
+        "model": "mlx-community/fish-audio-s2-pro-8bit",
+        "warmup": "[excited] Hi.",
+        "temperature": 0.7,
+        "top_k": 30,
+        "top_p": 0.7,
+        "max_tokens": 1024,
+    },
+}
 
-FISH_PROMPTS = [
-    "[excited] Hello.",
-    "[excited] Hello, this is a quick Fish Audio test on Apple Silicon.",
-    "[calm] The price is $42.99 — call 555-0123 today!",
-    "[curious] What is the capital of France, and why is it historically significant?",
-    (
-        "[excited] The quick brown fox jumps over the lazy dog. "
-        "[calm] Speech synthesis on Apple Silicon should feel fast and natural."
-    ),
-    (
-        "[excited] In a world where artificial intelligence transforms how we communicate, "
-        "[calm] voice synthesis stands at the frontier of human-computer interaction. "
-        "[low voice] Real-time text-to-speech enables assistants, accessibility tools, and "
-        "creative applications that were unimaginable a decade ago."
-    ),
-]
+PROMPTS = {
+    "qwen3": [
+        "Hello.",
+        "Hello, this is a quick Qwen3 TTS test on Apple Silicon.",
+        "The price is $42.99 — call 555-0123 today!",
+        "What is the capital of France, and why is it historically significant?",
+        (
+            "The quick brown fox jumps over the lazy dog. "
+            "Speech synthesis on Apple Silicon should feel fast and natural."
+        ),
+        (
+            "In a world where artificial intelligence transforms how we communicate, "
+            "voice synthesis stands at the frontier of human-computer interaction. "
+            "Real-time text-to-speech enables assistants, accessibility tools, and "
+            "creative applications that were unimaginable a decade ago."
+        ),
+    ],
+    "fish": [
+        "[excited] Hello.",
+        "[excited] Hello, this is a quick Fish Audio test on Apple Silicon.",
+        "[calm] The price is $42.99 — call 555-0123 today!",
+        "[curious] What is the capital of France, and why is it historically significant?",
+        (
+            "[excited] The quick brown fox jumps over the lazy dog. "
+            "[calm] Speech synthesis on Apple Silicon should feel fast and natural."
+        ),
+        (
+            "[excited] In a world where artificial intelligence transforms how we communicate, "
+            "[calm] voice synthesis stands at the frontier of human-computer interaction. "
+            "[low voice] Real-time text-to-speech enables assistants, accessibility tools, and "
+            "creative applications that were unimaginable a decade ago."
+        ),
+    ],
+}
 
 
 def _load_prompts(path: Path | None, backend: str) -> list[str]:
@@ -61,7 +78,7 @@ def _load_prompts(path: Path | None, backend: str) -> list[str]:
             if line.strip():
                 prompts.append(json.loads(line)["text"])
         return prompts
-    return QWEN3_PROMPTS if backend == "qwen3" else FISH_PROMPTS
+    return PROMPTS[backend]
 
 
 def _model_slug(model_id: str) -> str:
@@ -185,7 +202,7 @@ def _run_qwen3(args) -> None:
     )
 
     if not args.no_warmup:
-        list(model.generate(text="Hi.", **gen_kw))
+        list(model.generate(text=BACKENDS["qwen3"]["warmup"], **gen_kw))
 
     profiles, results = [], []
     for idx, text in enumerate(tqdm(prompts, desc="Benchmarking")):
@@ -222,7 +239,7 @@ def _run_fish(args) -> None:
         gen_kw["instruct"] = args.instruct
 
     if not args.no_warmup:
-        list(model.generate(text="[excited] Hi.", **gen_kw))
+        list(model.generate(text=BACKENDS["fish"]["warmup"], **gen_kw))
 
     profiles, results = [], []
     for idx, text in enumerate(tqdm(prompts, desc="Benchmarking")):
@@ -247,13 +264,13 @@ def main() -> None:
         help="TTS backend to benchmark",
     )
     parser.add_argument("--model", help="model id (defaults per backend)")
-    parser.add_argument("--voice", default="Ryan", help="Qwen3 speaker name")
-    parser.add_argument("--language", default="auto", help="Qwen3 language")
+    parser.add_argument("--voice", help="Qwen3 speaker name")
+    parser.add_argument("--language", help="Qwen3 language")
     parser.add_argument("--instruct", help="Fish style instruction")
-    parser.add_argument("--temperature", type=float, default=0.9)
-    parser.add_argument("--top-k", type=int, default=50)
-    parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--max-tokens", type=int, default=4096)
+    parser.add_argument("--temperature", type=float)
+    parser.add_argument("--top-k", type=int)
+    parser.add_argument("--top-p", type=float)
+    parser.add_argument("--max-tokens", type=int)
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--prompts-file", type=Path)
     parser.add_argument("--no-warmup", action="store_true")
@@ -270,16 +287,24 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    defaults = BACKENDS[args.backend]
     if args.model is None:
-        args.model = DEFAULT_MODELS[args.backend]
+        args.model = defaults["model"]
+    if args.temperature is None:
+        args.temperature = defaults["temperature"]
+    if args.top_k is None:
+        args.top_k = defaults["top_k"]
+    if args.top_p is None:
+        args.top_p = defaults["top_p"]
+    if args.max_tokens is None:
+        args.max_tokens = defaults["max_tokens"]
+    if args.backend == "qwen3":
+        if args.voice is None:
+            args.voice = defaults["voice"]
+        if args.language is None:
+            args.language = defaults["language"]
 
     if args.backend == "fish":
-        if args.temperature == 0.9 and args.top_k == 50 and args.top_p == 1.0:
-            args.temperature = 0.7
-            args.top_k = 30
-            args.top_p = 0.7
-        if args.max_tokens == 4096:
-            args.max_tokens = 1024
         _run_fish(args)
     else:
         _run_qwen3(args)
