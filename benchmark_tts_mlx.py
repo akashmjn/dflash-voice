@@ -1,7 +1,11 @@
+#!/usr/bin/env python3
+"""Benchmark MLX TTS backends (Qwen3, Fish Audio) with optional audio export."""
+
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 from pathlib import Path
 
@@ -12,6 +16,8 @@ DEFAULT_MODELS = {
     "qwen3": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
     "fish": "mlx-community/fish-audio-s2-pro-8bit",
 }
+
+DEFAULT_OUTPUT_DIR = Path("benchmark")
 
 QWEN3_PROMPTS = [
     "Hello.",
@@ -56,6 +62,20 @@ def _load_prompts(path: Path | None, backend: str) -> list[str]:
                 prompts.append(json.loads(line)["text"])
         return prompts
     return QWEN3_PROMPTS if backend == "qwen3" else FISH_PROMPTS
+
+
+def _model_slug(model_id: str) -> str:
+    slug = model_id.rsplit("/", 1)[-1].lower()
+    return re.sub(r"[^a-z0-9._-]+", "-", slug)
+
+
+def _save_audio(output_dir: Path, backend: str, model_id: str, idx: int, result) -> Path:
+    from mlx_audio.audio_io import write as audio_write
+
+    path = output_dir / backend / _model_slug(model_id) / f"prompt_{idx:03d}.wav"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    audio_write(path, result.audio, result.sample_rate, format="wav")
+    return path
 
 
 def _print_qwen3_prompt(idx: int, text: str, result, profile) -> None:
@@ -174,6 +194,9 @@ def _run_qwen3(args) -> None:
         profiles.append(profile)
         results.append(result)
         _print_qwen3_prompt(idx, text, result, profile)
+        if args.save_audio:
+            path = _save_audio(args.output_dir, "qwen3", args.model, idx, result)
+            print(f"  saved: {path}")
 
     _print_qwen3_aggregate(profiles, results)
 
@@ -208,6 +231,9 @@ def _run_fish(args) -> None:
         profiles.append(profile)
         results.append(result)
         _print_fish_prompt(idx, text, result, profile)
+        if args.save_audio:
+            path = _save_audio(args.output_dir, "fish", args.model, idx, result)
+            print(f"  saved: {path}")
 
     _print_fish_aggregate(profiles, results)
 
@@ -231,6 +257,17 @@ def main() -> None:
     parser.add_argument("--max-samples", type=int)
     parser.add_argument("--prompts-file", type=Path)
     parser.add_argument("--no-warmup", action="store_true")
+    parser.add_argument(
+        "--save-audio",
+        action="store_true",
+        help="write generated wav files under --output-dir",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=DEFAULT_OUTPUT_DIR,
+        help="directory for saved audio when --save-audio is set (default: ./benchmark)",
+    )
     args = parser.parse_args()
 
     if args.model is None:

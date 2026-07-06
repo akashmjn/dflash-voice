@@ -29,3 +29,6 @@ htmlcov/
 
 # Agent scratch space
 agent-workspace/
+
+# Benchmark output
+benchmark/
