@@ -24,9 +24,11 @@ Pinned deps match mlx-audio's tested stack (`mlx-lm==0.31.1`, `transformers==5.6
 
 ```bash
 # Will download models to HF_CACHE on first run
-python benchmark_tts_mlx.py --backend qwen3
-python benchmark_tts_mlx.py --backend fish
+python benchmark_mlx/bench_tts_mlx.py --backend qwen3
+python benchmark_mlx/bench_tts_mlx.py --backend fish
 ```
+
+GPU / vLLM-Omni Fish depth-step ablation (Modal H100): see [`benchmark_gpu/README.md`](benchmark_gpu/README.md).
 
 ## Benchmark results (aggregate)
 
@@ -41,4 +43,4 @@ python benchmark_tts_mlx.py --backend fish
 
 Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
 
-Raw metrics: `benchmark/qwen3/qwen3-tts-12hz-1.7b-base-8bit/metrics.json`, `benchmark/fish/fish-audio-s2-pro-8bit/metrics.json` (gitignored output dir — regenerate with `benchmark_tts_mlx.py`).
+Raw metrics: `benchmark_mlx/output/qwen3/qwen3-tts-12hz-1.7b-base-8bit/metrics.json`, `benchmark_mlx/output/fish/fish-audio-s2-pro-8bit/metrics.json` (gitignored — regenerate with `benchmark_mlx/bench_tts_mlx.py`).

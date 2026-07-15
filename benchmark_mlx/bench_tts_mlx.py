@@ -13,7 +13,7 @@ from typing import Any
 from rich import print
 from tqdm import tqdm
 
-DEFAULT_OUTPUT_DIR = Path("benchmark")
+DEFAULT_OUTPUT_DIR = Path("benchmark_mlx/output")
 
 BACKENDS = {
     "qwen3": {
@@ -63,9 +63,9 @@ PROMPTS = {
             "[calm] Speech synthesis on Apple Silicon should feel fast and natural."
         ),
         (
-            "[excited] In a world where artificial intelligence transforms how we communicate, "
-            "[calm] voice synthesis stands at the frontier of human-computer interaction. "
-            "[low voice] Real-time text-to-speech enables assistants, accessibility tools, and "
+            "[professional] In a world where artificial intelligence transforms how we communicate, "
+            "voice synthesis stands at the frontier of human-computer interaction. "
+            "[excited] Real-time text-to-speech enables assistants, accessibility tools, and "
             "creative applications that were unimaginable a decade ago."
         ),
     ],
@@ -314,7 +314,7 @@ def main() -> None:
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="directory for saved audio when --save-audio is set (default: ./benchmark)",
+        help="directory for saved audio when --save-audio is set (default: ./benchmark_mlx/output)",
     )
     args = parser.parse_args()
 

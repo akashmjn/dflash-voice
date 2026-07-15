@@ -27,8 +27,11 @@ htmlcov/
 # OS
 .DS_Store
 
-# Agent scratch space
+# Scratch space
 agent-workspace/
+tmp/
 
 # Benchmark output
-benchmark/
+benchmark_mlx/output
+benchmark_gpu/output
+
