@@ -109,16 +109,16 @@ def _timings(profile, backend: str):
 def _ms_stats(timings, decode_s: float = 0.0) -> dict[str, float]:
     n = len(timings)
     gen = [t.total_s * 1000 for t in timings]
-    bb = [t.backbone_s * 1000 for t in timings]
-    dp = [t.depth_decoder_s * 1000 for t in timings]
+    bb = [t.backbone_semantic_s * 1000 for t in timings]
+    dp = [t.depth_audio_s * 1000 for t in timings]
     dec = decode_s * 1000
     mean = statistics.mean
     return {
         "n": n,
         "gen_total": sum(gen) if n else 0.0,
         "gen_mean": mean(gen) if n else 0.0,
-        "backbone_mean": mean(bb) if n else 0.0,
-        "depth_mean": mean(dp) if n else 0.0,
+        "backbone_semantic_mean": mean(bb) if n else 0.0,
+        "depth_audio_mean": mean(dp) if n else 0.0,
         "decode_total": dec,
         "decode_mean": dec / n if n else 0.0,
         "rate": n / (sum(gen) / 1000) if gen else 0.0,
@@ -144,7 +144,8 @@ def _print_prompt(idx: int, text: str, result, profile, backend: str) -> None:
         print(
             f"  {label}: {s['gen_total']:.0f} ms "
             f"({s['gen_mean']:.1f} ms/{per}, "
-            f"backbone {s['backbone_mean']:.1f} | depth_decoder {s['depth_mean']:.1f})"
+            f"backbone_semantic {s['backbone_semantic_mean']:.1f} | "
+            f"depth_audio {s['depth_audio_mean']:.1f})"
         )
         print(
             f"  codec decode: {s['decode_total']:.0f} ms ({s['decode_mean']:.1f} ms/{per})"
@@ -164,7 +165,8 @@ def _print_aggregate(profiles, results, backend: str) -> None:
         print(
             f"  {label}: {s['gen_total']:.0f} ms, "
             f"{s['gen_mean']:.1f} ms/{per} "
-            f"(backbone {s['backbone_mean']:.1f} | depth_decoder {s['depth_mean']:.1f}), "
+            f"(backbone_semantic {s['backbone_semantic_mean']:.1f} | "
+            f"depth_audio {s['depth_audio_mean']:.1f}), "
             f"{s['rate']:.1f} {unit}/s"
         )
         print(
@@ -190,8 +192,8 @@ def _prompt_metrics(
         "generate_ms": {
             "total": s["gen_total"],
             f"per_{unit}": s["gen_mean"],
-            f"backbone_per_{unit}": s["backbone_mean"],
-            f"depth_decoder_per_{unit}": s["depth_mean"],
+            f"backbone_semantic_per_{unit}": s["backbone_semantic_mean"],
+            f"depth_audio_per_{unit}": s["depth_audio_mean"],
         },
         "codec_decode_ms": {
             "total": s["decode_total"],
@@ -211,8 +213,8 @@ def _aggregate_metrics(profiles, results, backend: str) -> dict[str, Any]:
         "generate_ms": {
             "total": s["gen_total"],
             f"per_{unit}": s["gen_mean"],
-            f"backbone_per_{unit}": s["backbone_mean"],
-            f"depth_decoder_per_{unit}": s["depth_mean"],
+            f"backbone_semantic_per_{unit}": s["backbone_semantic_mean"],
+            f"depth_audio_per_{unit}": s["depth_audio_mean"],
             f"{unit}s_per_s": s["rate"],
         },
         "codec_decode_ms": {

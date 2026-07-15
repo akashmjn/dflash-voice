@@ -53,8 +53,8 @@ RAS_HIGH_TOP_P = 0.9
 @dataclass
 class TokenTiming:
     token_idx: int
-    backbone_s: float
-    depth_decoder_s: float
+    backbone_semantic_s: float
+    depth_audio_s: float
     total_s: float
 
 
@@ -306,7 +306,7 @@ def _generate_codes(
 
         if profile is not None:
             mx.eval(semantic_token, previous_codebooks)
-            backbone_s = time.perf_counter() - t0
+            backbone_semantic_s = time.perf_counter() - t0
             t1 = time.perf_counter()
 
         for _ in range(model.model.num_codebooks - 1):
@@ -324,13 +324,13 @@ def _generate_codes(
 
         if profile is not None:
             mx.eval(previous_codebooks)
-            depth_decoder_s = time.perf_counter() - t1
+            depth_audio_s = time.perf_counter() - t1
             total_s = time.perf_counter() - t_step
             profile.token_timings.append(
                 TokenTiming(
                     token_idx=len(generated_steps),
-                    backbone_s=backbone_s,
-                    depth_decoder_s=depth_decoder_s,
+                    backbone_semantic_s=backbone_semantic_s,
+                    depth_audio_s=depth_audio_s,
                     total_s=total_s,
                 )
             )

@@ -46,8 +46,8 @@ MLX_AUDIO_VERSION = "0.4.4"
 @dataclass
 class FrameTiming:
     frame_idx: int
-    backbone_s: float
-    depth_decoder_s: float
+    backbone_semantic_s: float
+    depth_audio_s: float
     total_s: float
 
 
@@ -92,7 +92,7 @@ def _sample_codebook_token(
     eos_token_id: Optional[int] = None,
     min_p: float = 0.0,
 ) -> mx.array:
-    """Sample s_t (codebook 0) from backbone or depth-decoder logits [1, seq, vocab]."""
+    """Sample s_t (codebook 0) from backbone_semantic or depth_audio logits [1, seq, vocab]."""
     logits = logits[:, -1, :]
 
     if suppress_tokens:
@@ -258,8 +258,8 @@ def _prepare_prompt(
 # ---------------------------------------------------------------------------
 
 
-def _reset_depth_cache(depth_cache) -> None:
-    for cache in depth_cache:
+def _reset_depth_audio_cache(depth_audio_cache) -> None:
+    for cache in depth_audio_cache:
         cache.keys = None
         cache.values = None
         cache.offset = 0
@@ -269,18 +269,18 @@ def _depth_decode_audio_tokens(
     model,
     s_t: mx.array,
     h_t: mx.array,
-    depth_cache,
+    depth_audio_cache,
     *,
     temperature: float,
     top_k: int,
     top_p: float,
 ) -> List[mx.array]:
-    """Predict a_t (codebooks 1..N-1) given semantic token s_t and backbone hidden h_t."""
+    """Predict a_t (codebooks 1..N-1) given semantic token s_t and backbone_semantic hidden h_t."""
     config = model.config.talker_config
     a_t: List[mx.array] = []
     depth_hidden = h_t[:, -1:, :]
 
-    _reset_depth_cache(depth_cache)
+    _reset_depth_audio_cache(depth_audio_cache)
 
     for code_idx in range(config.num_code_groups - 1):
         if code_idx == 0:
@@ -291,9 +291,9 @@ def _depth_decode_audio_tokens(
                 a_t[-1]
             )
 
-        depth_logits, depth_cache, _ = model.talker.code_predictor(
+        depth_logits, depth_audio_cache, _ = model.talker.code_predictor(
             depth_input,
-            cache=depth_cache,
+            cache=depth_audio_cache,
             generation_step=code_idx,
         )
         a_t.append(
@@ -316,7 +316,7 @@ def _build_frame_embedding(
     text_pad_embed: mx.array,
     text_idx: int,
 ) -> Tuple[mx.array, int]:
-    """Build e_t = text_embed + embed(s_t) + sum(embed(a_i)) for the next backbone step."""
+    """Build e_t = text_embed + embed(s_t) + sum(embed(a_i)) for the next backbone_semantic step."""
     if text_idx < text_stream.shape[1]:
         text_embed = text_stream[:, text_idx : text_idx + 1, :]
         text_idx += 1
@@ -362,8 +362,8 @@ def _generate_codec_frames(
         if i != eos_token_id
     ]
 
-    backbone_cache = model.talker.make_cache()
-    depth_cache = model.talker.code_predictor.make_cache()
+    backbone_semantic_cache = model.talker.make_cache()
+    depth_audio_cache = model.talker.code_predictor.make_cache()
     generated_token_ids: List[int] = []
     generated_frames: List[mx.array] = []
     text_idx = 0
@@ -397,7 +397,7 @@ def _generate_codec_frames(
             t_step = time.perf_counter()
             t0 = time.perf_counter()
 
-        logits, h_t = model.talker(e_t, cache=backbone_cache)
+        logits, h_t = model.talker(e_t, cache=backbone_semantic_cache)
         s_t = _sample_codebook_token(
             logits,
             temperature=temperature,
@@ -411,7 +411,7 @@ def _generate_codec_frames(
 
         if profile is not None:
             mx.eval(s_t, h_t)
-            backbone_s = time.perf_counter() - t0
+            backbone_semantic_s = time.perf_counter() - t0
             t1 = time.perf_counter()
 
         is_eos = s_t[0, 0] == eos_token_id
@@ -420,7 +420,7 @@ def _generate_codec_frames(
             model,
             s_t,
             h_t,
-            depth_cache,
+            depth_audio_cache,
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
@@ -429,7 +429,7 @@ def _generate_codec_frames(
         if profile is not None:
             if a_t:
                 mx.eval(a_t[-1])
-            depth_decoder_s = time.perf_counter() - t1
+            depth_audio_s = time.perf_counter() - t1
 
         e_t, text_idx = _build_frame_embedding(
             model,
@@ -456,8 +456,8 @@ def _generate_codec_frames(
             profile.frame_timings.append(
                 FrameTiming(
                     frame_idx=len(generated_frames) - 1,
-                    backbone_s=backbone_s,
-                    depth_decoder_s=depth_decoder_s,
+                    backbone_semantic_s=backbone_semantic_s,
+                    depth_audio_s=depth_audio_s,
                     total_s=total_s,
                 )
             )

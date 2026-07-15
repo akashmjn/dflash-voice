@@ -1,6 +1,6 @@
 # dflash-voice
 
-Readable MLX TTS inference and benchmarking for **Qwen3-TTS** and **Fish Audio S2 Pro**, ported from [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.4.4. Inference loop is ported to understand key components and benchmark per-frame timing (backbone vs depth decoder).
+Readable MLX TTS inference and benchmarking for **Qwen3-TTS** and **Fish Audio S2 Pro**, ported from [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.4.4. Inference loop is ported to understand key components and benchmark per-frame timing (backbone_semantic vs depth_audio).
 
 ## Current state
 
@@ -34,12 +34,12 @@ GPU / vLLM-Omni Fish depth-step ablation (Modal H100): see [`benchmark_gpu/READM
 
 6 prompts per model, 8-bit MLX checkpoints, 64GB M1 Max Apple Silicon. **Gen RTF** = codec-frame generation speed vs native frame rate; **Wall RTF** = end-to-end including codec decode.
 
-![TTS MLX benchmark aggregate](docs/benchmark-aggregate.png)
+![TTS MLX benchmark aggregate](docs/benchmark-time-per-frame.png)
 
-| Model | Native | Backbone | Depth | Depth % | Depth iters | ms / depth iter | Total ms | Codec frames/s | Gen RTF | Wall RTF |
-|-------|--------|----------|-------|---------|-------------|-----------------|----------|----------------|---------|----------|
-| Qwen3 1.7B 8bit | 12.5 Hz | 9.5 ms | 17.3 ms | 63% | 15 | 1.16 ms | 27.3 ms | 36.6 | 2.93× | 2.43× |
-| Fish S2 Pro 8bit | 21 Hz | 22.4 ms | 20.6 ms | 48% | 9 | 2.29 ms | 43.0 ms | 23.3 | 1.11× | 0.88× |
+| Model | Native | Backbone (semantic codes) | Depth (audio codes) | Depth % | Depth iters | ms / depth iter | Total ms | Codec frames/s | Gen RTF | Wall RTF |
+|-------|--------|---------------------------|---------------------|---------|-------------|-----------------|----------|----------------|---------|----------|
+| Qwen3 1.7B 8bit | 12.5 Hz | 9.4 ms | 17.0 ms | 63% | 15 | 1.13 ms | 26.9 ms | 37.2 | 2.98× | 2.52× |
+| Fish S2 Pro 8bit | 21 Hz | 21.9 ms | 20.4 ms | 48% | 9 | 2.26 ms | 42.3 ms | 23.7 | 1.13× | 0.92× |
 
 Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
 
