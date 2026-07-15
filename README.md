@@ -46,19 +46,19 @@ Raw metrics: (gitignored — regenerate with `benchmark_mlx/bench_tts_mlx.py`).
 
 This started after noticing an expensive memory bottleneck for audio tokens mentioned in the [Sesame CSM blog post](https://www.sesame.com/blog/crossing-the-uncanny-valley-of-voice). Why should audio tokens be comparably expensive to predict vs language tokens? Especially given the lower information density.
 
-![TTS MLX benchmark aggregate](docs/entropy-per-codebook.png)
+![Entropy vs RVQ codebook depth](docs/entropy-per-codebook.png)
 
-Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (essentially an 8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes?
+Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes?
 
-![TTS MLX benchmark aggregate](docs/entropy-per-frame.png)
+![Entropy vs codec frames i.e. time](docs/entropy-per-frame.png)
 
-From an information theory lens: we are seeing variable rate of information density, both across depth (RVQ audio codes) and across time (semantic codes). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to a autoregressive backbone and depth models predicting both.
+From an information theory lens: there is clearly a varying rate of information density, both across time (codec frames - plotted above) and depth (RVQ audio codebook depth - first plot). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to a autoregressive 1-4B LLM backbone predicting semantic codes across time and smaller decoders predicting audio RVQ codebooks across depth.
 
 Given what we've seen above, and inspired by speculative decoding and flow matching, it would be nice to get more bang for buck per model compute. Why not spend less compute on the easy stuff?
 
-More to come here soon. Feel free to reach me [here](https://akashmjn.me/) if you've thoughts here!
+More to come here soon. Feel free to [reach me](https://akashmjn.me/) if you've any thoughts!
 
-> P.S.: repo naming was originally motivated by speculative decoding methods like [DFlash](https://github.com/z-lab/dflash) for TTS models. However turns out specdec for TTS is complicated by the dual-RVQ (semantic + audio) codec structure used by most models. The current focus is on a narrower bottleneck: speeding up/simplifying audio codec generation to begin. Will rename appropriately :)
+> P.S.: repo naming was originally motivated by speculative decoding methods like [DFlash](https://github.com/z-lab/dflash) for TTS models. However turns out specdec for TTS is complicated by the dual-RVQ (semantic + audio) codec structure used by most models. The current focus is on a narrower bottleneck: speeding up/simplifying audio codec generation to begin. Will revisit/rename appropriately :)
 
 ## Citation
 
