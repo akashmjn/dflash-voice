@@ -2,7 +2,7 @@
 
 The goal of this project is to speed up TTS inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
 
-![TTS MLX benchmark aggregate](docs/benchmark-time-per-frame.png)
+![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
 ## Current state
 
