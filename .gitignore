@@ -36,9 +36,11 @@ benchmark_mlx/output
 benchmark_gpu/output
 
 # Dataprep downloads and generated artifacts
-data/**/raw/
-data/**/*_tokenized/
+data/
 
 # Lockfile (regenerate with `uv lock`)
 uv.lock
 
+
+# Local scratchpad (not for git)
+TODO.txt

@@ -32,14 +32,17 @@ framing comes from `Conversation.encode_for_inference`.
 ## Environments
 
 MisoTTS pins Transformers 4.49 while the tested MLX stack pins Transformers
-5.6, so they intentionally use separate uv environments:
+5.6 / `huggingface-hub` 1.5, so `dataprep` and `dataprep-mlx` (and `tts_mlx`)
+conflict — install only one extra in a given environment:
 
 ```bash
-uv sync --group dataprep --no-default-groups
+# Miso stack
+uv pip install -e ".[dataprep]"
 # For local Miso development, replace the installed package:
 uv pip install -e ../MisoTTS
 
-uv sync --group dataprep-mlx --no-default-groups
+# Qwen3 / Fish MLX stack (replaces the Miso pins above)
+uv pip install -e ".[dataprep-mlx]"
 ```
 
 ## Prepare (debug)
@@ -48,22 +51,19 @@ uv sync --group dataprep-mlx --no-default-groups
 per-row raw/tokenized intermediates. Full-dataset parquet export is not
 implemented yet and requires omitting `--debug`.
 
-Run the single-segment Miso forward check before a debug prepare:
+Run the single-segment Miso forward check before a debug prepare (Miso env):
 
 ```bash
-DFLASH_RUN_MISO_FORWARD=1 uv run --group dataprep \
-  pytest dataprep/tests/test_miso_forward.py -m integration
-uv run --group dataprep python -m dataprep.prepare \
-  --model miso --debug --verify-decode
+DFLASH_RUN_MISO_FORWARD=1 pytest dataprep/tests/test_miso_forward.py -m integration
+python -m dataprep.prepare --model miso --debug --verify-decode
 ```
 
-Then use a `dataprep-mlx` environment for Qwen3 and Fish:
+Then switch to the MLX dataprep extra for Qwen3 and Fish:
 
 ```bash
-uv run --group dataprep-mlx python -m dataprep.prepare \
-  --model qwen3 --debug --verify-decode
-uv run --group dataprep-mlx python -m dataprep.prepare \
-  --model fish --debug --verify-decode
+uv pip install -e ".[dataprep-mlx]"
+python -m dataprep.prepare --model qwen3 --debug --verify-decode
+python -m dataprep.prepare --model fish --debug --verify-decode
 ```
 
 Downloaded and generated files are ignored by Git; this README is tracked.
