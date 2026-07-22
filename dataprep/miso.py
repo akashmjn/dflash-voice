@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 from typing import Any, Sequence
 
+# Moshi decode on Apple MPS needs this before Torch initializes MPS kernels.
+os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
 from dataprep.tokenizer import (
     Segment,
     SequenceSpan,
