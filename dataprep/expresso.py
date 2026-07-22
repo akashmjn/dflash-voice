@@ -34,10 +34,14 @@ def _parse_segments(row: dict[str, Any]) -> list[dict[str, Any]]:
             result = []
             for index, item in enumerate(value):
                 segment = dict(item)
-                start_ms = float(segment.get("start_time_ms", segment.get("start", 0) * 1000))
+                start_ms = float(
+                    segment.get("start_time_ms", segment.get("start", 0) * 1000)
+                )
                 end_ms = float(segment.get("end_time_ms", segment.get("end", 0) * 1000))
                 if end_ms <= start_ms:
-                    raise ValueError(f"Invalid timing for segment {index}: {start_ms}..{end_ms} ms")
+                    raise ValueError(
+                        f"Invalid timing for segment {index}: {start_ms}..{end_ms} ms"
+                    )
                 segment.update(
                     {
                         "segment_id": index,
@@ -60,7 +64,9 @@ def _decode_audio(row: dict[str, Any]) -> tuple[np.ndarray, int]:
         if not isinstance(value, dict):
             continue
         if value.get("bytes") is not None:
-            audio, sample_rate = sf.read(io.BytesIO(value["bytes"]), dtype="float32", always_2d=True)
+            audio, sample_rate = sf.read(
+                io.BytesIO(value["bytes"]), dtype="float32", always_2d=True
+            )
             return audio.T, int(sample_rate)
         if value.get("path"):
             audio, sample_rate = sf.read(value["path"], dtype="float32", always_2d=True)
@@ -116,7 +122,9 @@ def download_expresso(
                     f"{segment['channel']} but audio has {audio.shape[0]} channels"
                 )
             if segment["start"] < 0 or segment["end"] > duration + 1 / sample_rate:
-                raise ValueError(f"Row {row_index} segment timing falls outside {duration:.3f}s audio")
+                raise ValueError(
+                    f"Row {row_index} segment timing falls outside {duration:.3f}s audio"
+                )
 
         row_dir = root / str(row_index)
         row_dir.mkdir(parents=True, exist_ok=True)

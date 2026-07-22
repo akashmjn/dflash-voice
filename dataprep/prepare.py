@@ -35,7 +35,9 @@ def segment_frame_bounds(
     start = max(0, int(math.floor(float(segment["start"]) * frame_rate)))
     end = min(max_frames, int(math.ceil(float(segment["end"]) * frame_rate)))
     if end <= start:
-        raise ValueError(f"Segment {segment.get('segment_id')} maps to empty codec frame range")
+        raise ValueError(
+            f"Segment {segment.get('segment_id')} maps to empty codec frame range"
+        )
     return start, end
 
 
@@ -146,7 +148,9 @@ def prepare_row(
     import torch
 
     example, audio = load_raw_example(row_dir)
-    output_dir = Path(output_root) / "expresso" / f"{model}_tokenized" / str(example.row)
+    output_dir = (
+        Path(output_root) / "expresso" / f"{model}_tokenized" / str(example.row)
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     channel_codes = [
@@ -165,8 +169,13 @@ def prepare_row(
 
     segments = _build_segments(example, channel_codes, tokenizer)
     sequences = _build_sequences(segments, tokenizer, pack_segments=pack_segments)
-    torch.save([_as_torch(item.tokens).long() for item in sequences], output_dir / "sequences.pt")
-    torch.save([_as_torch(item.mask).bool() for item in sequences], output_dir / "masks.pt")
+    torch.save(
+        [_as_torch(item.tokens).long() for item in sequences],
+        output_dir / "sequences.pt",
+    )
+    torch.save(
+        [_as_torch(item.mask).bool() for item in sequences], output_dir / "masks.pt"
+    )
 
     metadata = {
         "model": model,
@@ -187,14 +196,18 @@ def prepare_row(
             for index, sequence in enumerate(sequences)
         ],
     }
-    (output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    (output_dir / "metadata.json").write_text(
+        json.dumps(metadata, indent=2), encoding="utf-8"
+    )
 
     if verify_decode:
         for channel, codes in enumerate(channel_codes):
             check_frames = max(1, int(round(tokenizer.audio_codec.frame_rate * 5)))
             decoded = np.asarray(tokenizer.audio_codec.decode(codes[:check_frames]))
             if decoded.size == 0 or not np.isfinite(decoded).all():
-                raise RuntimeError(f"{model} row {example.row} channel {channel} decode was empty/non-finite")
+                raise RuntimeError(
+                    f"{model} row {example.row} channel {channel} decode was empty/non-finite"
+                )
     return output_dir
 
 
@@ -209,7 +222,11 @@ def prepare_rows(
     pack_segments: bool = False,
 ) -> list[Path]:
     raw_root = Path(data_root) / "expresso" / "raw"
-    missing = [row for row in rows if not (raw_root / str(row) / "transcript_segments.json").exists()]
+    missing = [
+        row
+        for row in rows
+        if not (raw_root / str(row) / "transcript_segments.json").exists()
+    ]
     if missing:
         download_expresso(missing, root=raw_root)
     tokenizer = load_tokenizer(model, model_id=model_id, device=device)
@@ -243,7 +260,9 @@ def resolve_prepare_rows(*, debug: int | None) -> list[int]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Prepare Expresso codebooks and flat TTS sequences.")
+    parser = argparse.ArgumentParser(
+        description="Prepare Expresso codebooks and flat TTS sequences."
+    )
     parser.add_argument("--model", choices=("miso", "qwen3", "fish"), required=True)
     parser.add_argument(
         "--debug",

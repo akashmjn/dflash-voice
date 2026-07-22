@@ -1,4 +1,9 @@
-from dataprep.prepare import _build_sequences, _pack_segments, resolve_prepare_rows, segment_frame_bounds
+from dataprep.prepare import (
+    _build_sequences,
+    _pack_segments,
+    resolve_prepare_rows,
+    segment_frame_bounds,
+)
 from dataprep.tokenizer import Segment
 import pytest
 
@@ -35,11 +40,14 @@ def test_pack_segments_respects_model_limit():
         TwoSegmentTokenizer(),
     )
     assert chunks == [("a", "b"), ("c",)]
-    assert _build_sequences(
-        [Segment("a"), Segment("b"), Segment("c")],
-        TwoSegmentTokenizer(),
-        pack_segments=True,
-    ) == chunks
+    assert (
+        _build_sequences(
+            [Segment("a"), Segment("b"), Segment("c")],
+            TwoSegmentTokenizer(),
+            pack_segments=True,
+        )
+        == chunks
+    )
 
 
 def test_debug_mode_selects_first_rows_and_full_run_is_deferred():

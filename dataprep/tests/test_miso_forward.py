@@ -9,7 +9,8 @@ import pytest
 REFERENCE_ROOT = Path(
     os.environ.get(
         "MISO_ENTROPY_REFERENCE",
-        Path(__file__).resolve().parents[3] / "MisoTTS/mimi_entropy_work/expresso_row_0",
+        Path(__file__).resolve().parents[3]
+        / "MisoTTS/mimi_entropy_work/expresso_row_0",
     )
 )
 
@@ -53,7 +54,9 @@ def test_prepared_single_segment_matches_saved_miso_entropy():
         sample_rate = 24_000
         frame_rate = 12.5
 
-    tokenizer = MisoTokenizer(audio_codec=CodecInfo(), text_tokenizer=load_llama3_tokenizer())
+    tokenizer = MisoTokenizer(
+        audio_codec=CodecInfo(), text_tokenizer=load_llama3_tokenizer()
+    )
     prepared = tokenizer.apply_chat_template(
         [Segment(text=turn["text"], speaker=expected["speaker_id"], audio_codes=codes)]
     )
@@ -65,9 +68,11 @@ def test_prepared_single_segment_matches_saved_miso_entropy():
     config = resolve_inference_config(device=os.environ.get("MISO_FORWARD_DEVICE"))
     generator = load_miso_8b(device=config.model_device, dtype=config.dtype)
     device_batch = [value.to(generator.model_device) for value in batch]
-    with torch.inference_mode(), disable_kv_cache(
-        generator._model.backbone
-    ), disable_kv_cache(generator._model.decoder):
+    with (
+        torch.inference_mode(),
+        disable_kv_cache(generator._model.backbone),
+        disable_kv_cache(generator._model.decoder),
+    ):
         c0_logits, c1_logits, *_ = generator._model.forward(*device_batch)
 
     target_positions = device_batch[-1][0]

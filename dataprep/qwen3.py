@@ -5,7 +5,12 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from dataprep.tokenizer import Segment, SequenceSpan, TokenizedSequence, validate_sequence
+from dataprep.tokenizer import (
+    Segment,
+    SequenceSpan,
+    TokenizedSequence,
+    validate_sequence,
+)
 
 
 def _mx():
@@ -20,7 +25,9 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
     from scipy.signal import resample_poly
 
     divisor = gcd(source_rate, target_rate)
-    return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(np.float32)
+    return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(
+        np.float32
+    )
 
 
 class Qwen3AudioCodec:
@@ -37,8 +44,12 @@ class Qwen3AudioCodec:
                 "speech_tokenizer/encoder_config.json for dataprep"
             )
         self._codec = speech_tokenizer
-        self.sample_rate = int(getattr(speech_tokenizer, "input_sample_rate", self.sample_rate))
-        encoder_config = getattr(getattr(speech_tokenizer, "encoder_model", None), "config", None)
+        self.sample_rate = int(
+            getattr(speech_tokenizer, "input_sample_rate", self.sample_rate)
+        )
+        encoder_config = getattr(
+            getattr(speech_tokenizer, "encoder_model", None), "config", None
+        )
         self.frame_rate = float(getattr(encoder_config, "frame_rate", self.frame_rate))
 
     def encode(self, audio: Any, sample_rate: int):
@@ -56,7 +67,9 @@ class Qwen3AudioCodec:
         mx = _mx()
         codes = mx.array(codes)
         if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}")
+            raise ValueError(
+                f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}"
+            )
         audio, audio_lengths = self._codec.decode(codes[None])
         return audio[0, : int(audio_lengths[0].item())]
 
@@ -80,13 +93,21 @@ class Qwen3Tokenizer:
         self.audio_codec = Qwen3AudioCodec(model.speech_tokenizer)
         self.text_tokenizer = model.tokenizer
         talker_config = model.config.talker_config
-        self.max_seq_length = int(getattr(talker_config, "max_position_embeddings", 2048))
+        self.max_seq_length = int(
+            getattr(talker_config, "max_position_embeddings", 2048)
+        )
 
     def _codec_prefix(self) -> list[int]:
         config = self._model.config.talker_config
-        language_id = getattr(config, "codec_language_id", {}).get(self.language.lower())
+        language_id = getattr(config, "codec_language_id", {}).get(
+            self.language.lower()
+        )
         if language_id is None:
-            prefix = [config.codec_nothink_id, config.codec_think_bos_id, config.codec_think_eos_id]
+            prefix = [
+                config.codec_nothink_id,
+                config.codec_think_bos_id,
+                config.codec_think_eos_id,
+            ]
         else:
             prefix = [
                 config.codec_think_id,
@@ -118,7 +139,13 @@ class Qwen3Tokenizer:
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
-                SequenceSpan(segment_index, position, position + len(text_ids), "text", segment.metadata)
+                SequenceSpan(
+                    segment_index,
+                    position,
+                    position + len(text_ids),
+                    "text",
+                    segment.metadata,
+                )
             )
             position += len(text_ids)
 
@@ -147,7 +174,13 @@ class Qwen3Tokenizer:
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(segment_index, position, position + codes.shape[0], "audio", segment.metadata)
+                    SequenceSpan(
+                        segment_index,
+                        position,
+                        position + codes.shape[0],
+                        "audio",
+                        segment.metadata,
+                    )
                 )
                 position += codes.shape[0]
 
@@ -160,5 +193,7 @@ class Qwen3Tokenizer:
         )
         validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
         if result.length > self.max_seq_length:
-            raise ValueError(f"Sequence length {result.length} exceeds Qwen3 limit {self.max_seq_length}")
+            raise ValueError(
+                f"Sequence length {result.length} exceeds Qwen3 limit {self.max_seq_length}"
+            )
         return result

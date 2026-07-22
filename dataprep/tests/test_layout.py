@@ -29,7 +29,9 @@ def test_mask_rejects_audio_tokens_outside_audio_mask():
     tokens[1, 0] = 9
     with pytest.raises(ValueError, match="Audio-channel tokens must be zero"):
         validate_sequence(
-            TokenizedSequence(tokens=tokens, mask=mask, spans=[SequenceSpan(0, 0, 3, "text")]),
+            TokenizedSequence(
+                tokens=tokens, mask=mask, spans=[SequenceSpan(0, 0, 3, "text")]
+            ),
             num_codebooks=2,
             text_channel=-1,
         )

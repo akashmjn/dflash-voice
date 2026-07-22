@@ -5,7 +5,12 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from dataprep.tokenizer import Segment, SequenceSpan, TokenizedSequence, validate_sequence
+from dataprep.tokenizer import (
+    Segment,
+    SequenceSpan,
+    TokenizedSequence,
+    validate_sequence,
+)
 
 
 def _mx():
@@ -20,7 +25,9 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
     from scipy.signal import resample_poly
 
     divisor = gcd(source_rate, target_rate)
-    return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(np.float32)
+    return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(
+        np.float32
+    )
 
 
 class FishAudioCodec:
@@ -59,7 +66,9 @@ class FishAudioCodec:
         mx = _mx()
         codes = mx.array(codes)
         if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}")
+            raise ValueError(
+                f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}"
+            )
         chunk_frames = max(1, int(self.frame_rate * self.chunk_duration_sec))
         chunks = []
         for start in range(0, codes.shape[0], chunk_frames):
@@ -85,7 +94,9 @@ class FishTokenizer:
         self.audio_codec = FishAudioCodec(model.codec)
         self.text_tokenizer = model.tokenizer
         self.max_seq_length = int(
-            getattr(model.config, "max_seq_len", getattr(model.config, "max_length", 32_768))
+            getattr(
+                model.config, "max_seq_len", getattr(model.config, "max_length", 32_768)
+            )
         )
 
     def _encode_segment(self, segment: Segment):
@@ -160,7 +171,13 @@ class FishTokenizer:
             encoded.append(tokens)
             masks.append(mask)
             spans.append(
-                SequenceSpan(segment_index, position, position + tokens.shape[0], "segment", segment.metadata)
+                SequenceSpan(
+                    segment_index,
+                    position,
+                    position + tokens.shape[0],
+                    "segment",
+                    segment.metadata,
+                )
             )
             position += tokens.shape[0]
 
@@ -173,5 +190,7 @@ class FishTokenizer:
         )
         validate_sequence(result, self.audio_codec.num_codebooks, text_channel=0)
         if result.length > self.max_seq_length:
-            raise ValueError(f"Sequence length {result.length} exceeds Fish limit {self.max_seq_length}")
+            raise ValueError(
+                f"Sequence length {result.length} exceeds Fish limit {self.max_seq_length}"
+            )
         return result

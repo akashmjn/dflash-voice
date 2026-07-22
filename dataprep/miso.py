@@ -3,7 +3,12 @@ from __future__ import annotations
 import os
 from typing import Any, Sequence
 
-from dataprep.tokenizer import Segment, SequenceSpan, TokenizedSequence, validate_sequence
+from dataprep.tokenizer import (
+    Segment,
+    SequenceSpan,
+    TokenizedSequence,
+    validate_sequence,
+)
 
 
 def _torch():
@@ -48,13 +53,17 @@ class MisoAudioCodec:
             from moshi.models import loaders
 
             try:
-                from moshi_compat import patch_bitsandbytes_import_for_unquantized_layers
+                from moshi_compat import (
+                    patch_bitsandbytes_import_for_unquantized_layers,
+                )
 
                 patch_bitsandbytes_import_for_unquantized_layers()
             except ImportError:
                 pass
             weight = hf_hub_download(loaders.DEFAULT_REPO, loaders.MIMI_NAME)
-            codec = loaders.get_mimi(weight, device=self.device, num_codebooks=self.num_codebooks)
+            codec = loaders.get_mimi(
+                weight, device=self.device, num_codebooks=self.num_codebooks
+            )
             codec.set_num_codebooks(self.num_codebooks)
         self._codec = codec
         self.sample_rate = int(codec.sample_rate)
@@ -70,11 +79,15 @@ class MisoAudioCodec:
         if sample_rate != self.sample_rate:
             import torchaudio
 
-            waveform = torchaudio.functional.resample(waveform, sample_rate, self.sample_rate)
+            waveform = torchaudio.functional.resample(
+                waveform, sample_rate, self.sample_rate
+            )
 
         frame_samples = int(round(self.sample_rate / self.frame_rate))
         chunk_samples = int(round(self.sample_rate * self.chunk_duration_sec))
-        chunk_samples = max(frame_samples, chunk_samples // frame_samples * frame_samples)
+        chunk_samples = max(
+            frame_samples, chunk_samples // frame_samples * frame_samples
+        )
         chunks = []
         with torch.inference_mode():
             for start in range(0, waveform.numel(), chunk_samples):
@@ -90,12 +103,16 @@ class MisoAudioCodec:
         torch = _torch()
         codes = torch.as_tensor(codes, dtype=torch.long)
         if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {tuple(codes.shape)}")
+            raise ValueError(
+                f"Expected codes shaped (F, {self.num_codebooks}), got {tuple(codes.shape)}"
+            )
         codes_cf = codes.transpose(0, 1).contiguous()
         frames = []
         with torch.inference_mode(), self._codec.streaming(1):
             for frame_idx in range(codes_cf.shape[1]):
-                frame = self._codec.decode(codes_cf[:, frame_idx : frame_idx + 1][None].to(self.device))
+                frame = self._codec.decode(
+                    codes_cf[:, frame_idx : frame_idx + 1][None].to(self.device)
+                )
                 frames.append(frame.cpu())
         return torch.cat(frames, dim=-1).squeeze(0).squeeze(0)
 
@@ -120,7 +137,11 @@ class MisoTokenizer:
         channels = self.audio_codec.num_codebooks + 1
 
         for segment_index, segment in enumerate(segments):
-            text_ids = list(self.text_tokenizer.encode(f"[{segment.speaker}] {segment.text.lstrip()}"))
+            text_ids = list(
+                self.text_tokenizer.encode(
+                    f"[{segment.speaker}] {segment.text.lstrip()}"
+                )
+            )
             text = torch.zeros(len(text_ids), channels, dtype=torch.long)
             text[:, -1] = torch.tensor(text_ids, dtype=torch.long)
             text_mask = torch.zeros_like(text, dtype=torch.bool)
@@ -128,7 +149,13 @@ class MisoTokenizer:
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
-                SequenceSpan(segment_index, position, position + len(text_ids), "text", segment.metadata)
+                SequenceSpan(
+                    segment_index,
+                    position,
+                    position + len(text_ids),
+                    "text",
+                    segment.metadata,
+                )
             )
             position += len(text_ids)
 
@@ -148,7 +175,13 @@ class MisoTokenizer:
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(segment_index, position, position + codes.shape[0], "audio", segment.metadata)
+                    SequenceSpan(
+                        segment_index,
+                        position,
+                        position + codes.shape[0],
+                        "audio",
+                        segment.metadata,
+                    )
                 )
                 position += codes.shape[0]
 
@@ -161,7 +194,9 @@ class MisoTokenizer:
         )
         validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
         if result.length > self.max_seq_length:
-            raise ValueError(f"Sequence length {result.length} exceeds Miso limit {self.max_seq_length}")
+            raise ValueError(
+                f"Sequence length {result.length} exceeds Miso limit {self.max_seq_length}"
+            )
         return result
 
 
@@ -171,7 +206,9 @@ def build_teacher_forcing_batch(sequence: TokenizedSequence):
     text_spans = [span for span in sequence.spans if span.kind == "text"]
     audio_spans = [span for span in sequence.spans if span.kind == "audio"]
     if len(text_spans) != 1 or len(audio_spans) != 1:
-        raise ValueError("Teacher-forcing verification requires exactly one text/audio segment")
+        raise ValueError(
+            "Teacher-forcing verification requires exactly one text/audio segment"
+        )
     text_span, audio_span = text_spans[0], audio_spans[0]
     if text_span.segment_index != audio_span.segment_index:
         raise ValueError("Text and audio spans must belong to the same segment")
