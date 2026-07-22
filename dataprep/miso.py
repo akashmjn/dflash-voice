@@ -12,19 +12,12 @@ def _torch():
     return torch
 
 
-class MisoTextTokenizer:
-    def __init__(self, tokenizer: Any | None = None):
-        if tokenizer is None:
-            from generator import load_llama3_tokenizer
+def _load_text_tokenizer(tokenizer: Any | None = None):
+    if tokenizer is None:
+        from generator import load_llama3_tokenizer
 
-            tokenizer = load_llama3_tokenizer()
-        self._tokenizer = tokenizer
-
-    def encode(self, text: str) -> list[int]:
-        return list(self._tokenizer.encode(text))
-
-    def decode(self, token_ids: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(token_ids)))
+        tokenizer = load_llama3_tokenizer()
+    return tokenizer
 
 
 class MisoAudioCodec:
@@ -91,17 +84,18 @@ class MisoAudioCodec:
                     chunks.append(codes[0].cpu().long())
         if not chunks:
             raise ValueError("Mimi produced no codec frames")
-        return torch.cat(chunks, dim=-1)
+        return torch.cat(chunks, dim=-1).transpose(0, 1).contiguous()
 
     def decode(self, codes: Any):
         torch = _torch()
         codes = torch.as_tensor(codes, dtype=torch.long)
-        if codes.ndim != 2 or codes.shape[0] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped ({self.num_codebooks}, F), got {tuple(codes.shape)}")
+        if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
+            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {tuple(codes.shape)}")
+        codes_cf = codes.transpose(0, 1).contiguous()
         frames = []
         with torch.inference_mode(), self._codec.streaming(1):
-            for frame_idx in range(codes.shape[1]):
-                frame = self._codec.decode(codes[:, frame_idx : frame_idx + 1][None].to(self.device))
+            for frame_idx in range(codes_cf.shape[1]):
+                frame = self._codec.decode(codes_cf[:, frame_idx : frame_idx + 1][None].to(self.device))
                 frames.append(frame.cpu())
         return torch.cat(frames, dim=-1).squeeze(0).squeeze(0)
 
@@ -112,10 +106,10 @@ class MisoTokenizer:
     def __init__(
         self,
         audio_codec: MisoAudioCodec | None = None,
-        text_tokenizer: MisoTextTokenizer | None = None,
+        text_tokenizer: Any | None = None,
     ):
         self.audio_codec = audio_codec or MisoAudioCodec()
-        self.text_tokenizer = text_tokenizer or MisoTextTokenizer()
+        self.text_tokenizer = _load_text_tokenizer(text_tokenizer)
 
     def apply_chat_template(self, segments: Sequence[Segment]) -> TokenizedSequence:
         torch = _torch()
@@ -123,13 +117,14 @@ class MisoTokenizer:
         masks = []
         spans: list[SequenceSpan] = []
         position = 0
+        channels = self.audio_codec.num_codebooks + 1
 
         for segment_index, segment in enumerate(segments):
-            text_ids = self.text_tokenizer.encode(f"[{segment.speaker}] {segment.text.lstrip()}")
-            text = torch.zeros(self.audio_codec.num_codebooks + 1, len(text_ids), dtype=torch.long)
-            text[-1] = torch.tensor(text_ids, dtype=torch.long)
+            text_ids = list(self.text_tokenizer.encode(f"[{segment.speaker}] {segment.text.lstrip()}"))
+            text = torch.zeros(len(text_ids), channels, dtype=torch.long)
+            text[:, -1] = torch.tensor(text_ids, dtype=torch.long)
             text_mask = torch.zeros_like(text, dtype=torch.bool)
-            text_mask[-1] = True
+            text_mask[:, -1] = True
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
@@ -139,31 +134,32 @@ class MisoTokenizer:
 
             if segment.audio_codes is not None:
                 codes = torch.as_tensor(segment.audio_codes, dtype=torch.long)
-                if codes.ndim != 2 or codes.shape[0] != self.audio_codec.num_codebooks:
+                if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
                     raise ValueError(
-                        f"Expected ({self.audio_codec.num_codebooks}, F) Miso codes, "
+                        f"Expected (F, {self.audio_codec.num_codebooks}) Miso codes, "
                         f"got {tuple(codes.shape)}"
                     )
-                codes = torch.cat([codes, torch.zeros(codes.shape[0], 1, dtype=torch.long)], dim=1)
-                audio = torch.zeros(self.audio_codec.num_codebooks + 1, codes.shape[1], dtype=torch.long)
-                audio[:-1] = codes
+                eos = torch.zeros(1, codes.shape[1], dtype=torch.long)
+                codes = torch.cat([codes, eos], dim=0)
+                audio = torch.zeros(codes.shape[0], channels, dtype=torch.long)
+                audio[:, :-1] = codes
                 audio_mask = torch.zeros_like(audio, dtype=torch.bool)
-                audio_mask[:-1] = True
+                audio_mask[:, :-1] = True
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(segment_index, position, position + codes.shape[1], "audio", segment.metadata)
+                    SequenceSpan(segment_index, position, position + codes.shape[0], "audio", segment.metadata)
                 )
-                position += codes.shape[1]
+                position += codes.shape[0]
 
         if not blocks:
             raise ValueError("At least one segment is required")
         result = TokenizedSequence(
-            tokens=torch.cat(blocks, dim=1),
-            mask=torch.cat(masks, dim=1),
+            tokens=torch.cat(blocks, dim=0),
+            mask=torch.cat(masks, dim=0),
             spans=spans,
         )
-        validate_sequence(result, self.audio_codec.num_codebooks)
+        validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
         if result.length > self.max_seq_length:
             raise ValueError(f"Sequence length {result.length} exceeds Miso limit {self.max_seq_length}")
         return result
@@ -182,12 +178,12 @@ def build_teacher_forcing_batch(sequence: TokenizedSequence):
 
     prepared = torch.as_tensor(sequence.tokens, dtype=torch.long)
     prepared_mask = torch.as_tensor(sequence.mask, dtype=torch.bool)
-    text_tokens = prepared[:, text_span.start : text_span.end].transpose(0, 1)
-    text_mask = prepared_mask[:, text_span.start : text_span.end].transpose(0, 1)
+    text_tokens = prepared[text_span.start : text_span.end]
+    text_mask = prepared_mask[text_span.start : text_span.end]
     # The prepared audio span has a final all-zero EOS frame; the reference
     # teacher-forcing path predicts real codec frames and does not target EOS.
-    audio_codes = prepared[:-1, audio_span.start : audio_span.end - 1]
-    num_codebooks, num_frames = audio_codes.shape
+    audio_codes = prepared[audio_span.start : audio_span.end - 1, :-1]
+    num_frames, num_codebooks = audio_codes.shape
     text_len = text_tokens.shape[0]
     seq_len = text_len + num_frames - 1
 
@@ -198,10 +194,10 @@ def build_teacher_forcing_batch(sequence: TokenizedSequence):
     tokens[:text_len] = text_tokens
     tokens_mask[:text_len] = text_mask
     if num_frames > 1:
-        tokens[text_len:, :num_codebooks] = audio_codes[:, :-1].transpose(0, 1)
+        tokens[text_len:, :num_codebooks] = audio_codes[:-1]
         tokens_mask[text_len:, :num_codebooks] = True
     target_positions = torch.arange(text_len - 1, seq_len, dtype=torch.long)
-    targets[target_positions] = audio_codes.transpose(0, 1)
+    targets[target_positions] = audio_codes
     targets_mask[target_positions] = True
     return (
         tokens.unsqueeze(0),

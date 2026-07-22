@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol, Sequence, runtime_checkable
 
+import numpy as np
+
 
 @dataclass
 class Segment:
@@ -25,7 +27,7 @@ class SequenceSpan:
 
 @dataclass
 class TokenizedSequence:
-    """Model-ready, channel-first tokens and their validity mask."""
+    """Model-ready tokens and validity mask shaped (seq_len, num_codebooks + 1)."""
 
     tokens: Any
     mask: Any
@@ -33,7 +35,7 @@ class TokenizedSequence:
 
     @property
     def length(self) -> int:
-        return int(self.tokens.shape[-1])
+        return int(self.tokens.shape[0])
 
 
 @runtime_checkable
@@ -43,10 +45,10 @@ class AudioCodec(Protocol):
     num_codebooks: int
 
     def encode(self, audio: Any, sample_rate: int) -> Any:
-        """Return integer codec indexes shaped (num_codebooks, frames)."""
+        """Return integer codec indexes shaped (frames, num_codebooks)."""
 
     def decode(self, codes: Any) -> Any:
-        """Decode (num_codebooks, frames) indexes to a mono waveform."""
+        """Decode (frames, num_codebooks) indexes to a mono waveform."""
 
 
 @runtime_checkable
@@ -67,17 +69,42 @@ class Tokenizer(Protocol):
         ...
 
 
-def validate_sequence(sequence: TokenizedSequence, num_codebooks: int) -> None:
-    expected_rows = num_codebooks + 1
-    if sequence.tokens.ndim != 2:
-        raise ValueError(f"Expected sequence tokens shaped (C+1, L), got {sequence.tokens.shape}")
-    if tuple(sequence.mask.shape) != tuple(sequence.tokens.shape):
+def _as_numpy(value: Any) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value
+    if hasattr(value, "detach"):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def validate_sequence(
+    sequence: TokenizedSequence,
+    num_codebooks: int,
+    *,
+    text_channel: int = -1,
+) -> None:
+    """Validate (L, C+1) layout and that mask/token channels agree."""
+    expected_channels = num_codebooks + 1
+    tokens = _as_numpy(sequence.tokens)
+    mask = _as_numpy(sequence.mask).astype(bool)
+    if tokens.ndim != 2:
+        raise ValueError(f"Expected sequence tokens shaped (L, C+1), got {tokens.shape}")
+    if mask.shape != tokens.shape:
         raise ValueError("Sequence mask must have the same shape as tokens")
-    if int(sequence.tokens.shape[0]) != expected_rows:
+    if int(tokens.shape[1]) != expected_channels:
         raise ValueError(
-            f"Expected {expected_rows} sequence rows for {num_codebooks} codebooks, "
-            f"got {sequence.tokens.shape[0]}"
+            f"Expected {expected_channels} sequence channels for {num_codebooks} codebooks, "
+            f"got {tokens.shape[1]}"
         )
+
+    text_channel = text_channel % expected_channels
+    audio_channels = [idx for idx in range(expected_channels) if idx != text_channel]
+    audio_active = mask[:, audio_channels].any(axis=1)
+    if np.any(tokens[~audio_active][:, audio_channels] != 0):
+        raise ValueError("Audio-channel tokens must be zero where the audio mask is inactive")
+    if np.any(tokens[~mask[:, text_channel], text_channel] != 0):
+        raise ValueError("Text-channel tokens must be zero where the text mask is inactive")
+
     for span in sequence.spans:
         if not 0 <= span.start < span.end <= sequence.length:
             raise ValueError(f"Invalid sequence span {span}")

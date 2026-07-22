@@ -23,17 +23,6 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
     return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(np.float32)
 
 
-class FishTextTokenizer:
-    def __init__(self, tokenizer: Any):
-        self._tokenizer = tokenizer
-
-    def encode(self, text: str) -> list[int]:
-        return list(self._tokenizer.encode(text))
-
-    def decode(self, token_ids: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(token_ids)))
-
-
 class FishAudioCodec:
     sample_rate = 44_100
     frame_rate = 21.0
@@ -61,20 +50,20 @@ class FishAudioCodec:
             )
             length = int(feature_lengths[0].item())
             if length:
-                chunks.append(indices[0, :, :length])
+                chunks.append(mx.transpose(indices[0, :, :length], (1, 0)))
         if not chunks:
             raise ValueError("Fish codec produced no frames")
-        return mx.concatenate(chunks, axis=1)
+        return mx.concatenate(chunks, axis=0)
 
     def decode(self, codes: Any):
         mx = _mx()
         codes = mx.array(codes)
-        if codes.ndim != 2 or codes.shape[0] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped ({self.num_codebooks}, F), got {codes.shape}")
+        if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
+            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}")
         chunk_frames = max(1, int(self.frame_rate * self.chunk_duration_sec))
         chunks = []
-        for start in range(0, codes.shape[1], chunk_frames):
-            chunk = codes[:, start : start + chunk_frames]
+        for start in range(0, codes.shape[0], chunk_frames):
+            chunk = mx.transpose(codes[start : start + chunk_frames], (1, 0))
             lengths = mx.array([chunk.shape[1]], dtype=mx.int32)
             audio, audio_lengths = self._codec.decode(chunk[None], lengths)
             chunks.append(audio[0, 0, : int(audio_lengths[0].item())])
@@ -94,7 +83,7 @@ class FishTokenizer:
             model = load_model(model_id)._model
         self._model = model
         self.audio_codec = FishAudioCodec(model.codec)
-        self.text_tokenizer = FishTextTokenizer(model.tokenizer)
+        self.text_tokenizer = model.tokenizer
         self.max_seq_length = int(
             getattr(model.config, "max_seq_len", getattr(model.config, "max_length", 32_768))
         )
@@ -111,9 +100,9 @@ class FishTokenizer:
         )
 
         codes = mx.array(segment.audio_codes, dtype=mx.int32)
-        if codes.ndim != 2 or codes.shape[0] != self.audio_codec.num_codebooks:
+        if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
             raise ValueError(
-                f"Expected ({self.audio_codec.num_codebooks}, F) Fish codes, got {codes.shape}"
+                f"Expected (F, {self.audio_codec.num_codebooks}) Fish codes, got {codes.shape}"
             )
         speaker_text = (
             segment.text
@@ -133,7 +122,7 @@ class FishTokenizer:
         conversation.append(
             Message(
                 role="assistant",
-                parts=[VQPart(codes)],
+                parts=[VQPart(mx.transpose(codes, (1, 0)))],
                 add_im_start=True,
                 add_im_end=True,
                 modality="voice",
@@ -153,32 +142,36 @@ class FishTokenizer:
         tokenizer = self._model.tokenizer
 
         for segment_index, segment in enumerate(segments):
-            tokens = self._encode_segment(segment)
-            audio_positions = (tokens[0] >= tokenizer.semantic_begin_id) & (
-                tokens[0] <= tokenizer.semantic_end_id
+            tokens_cf = self._encode_segment(segment)
+            tokens = mx.transpose(tokens_cf, (1, 0))
+            audio_positions = (tokens[:, 0] >= tokenizer.semantic_begin_id) & (
+                tokens[:, 0] <= tokenizer.semantic_end_id
             )
             mask = mx.concatenate(
                 [
-                    mx.ones((1, tokens.shape[1]), dtype=mx.bool_),
-                    mx.broadcast_to(audio_positions[None], (self.audio_codec.num_codebooks, tokens.shape[1])),
+                    mx.ones((tokens.shape[0], 1), dtype=mx.bool_),
+                    mx.broadcast_to(
+                        audio_positions[:, None],
+                        (tokens.shape[0], self.audio_codec.num_codebooks),
+                    ),
                 ],
-                axis=0,
+                axis=1,
             )
             encoded.append(tokens)
             masks.append(mask)
             spans.append(
-                SequenceSpan(segment_index, position, position + tokens.shape[1], "segment", segment.metadata)
+                SequenceSpan(segment_index, position, position + tokens.shape[0], "segment", segment.metadata)
             )
-            position += tokens.shape[1]
+            position += tokens.shape[0]
 
         if not encoded:
             raise ValueError("At least one segment is required")
         result = TokenizedSequence(
-            tokens=mx.concatenate(encoded, axis=1),
-            mask=mx.concatenate(masks, axis=1),
+            tokens=mx.concatenate(encoded, axis=0),
+            mask=mx.concatenate(masks, axis=0),
             spans=spans,
         )
-        validate_sequence(result, self.audio_codec.num_codebooks)
+        validate_sequence(result, self.audio_codec.num_codebooks, text_channel=0)
         if result.length > self.max_seq_length:
             raise ValueError(f"Sequence length {result.length} exceeds Fish limit {self.max_seq_length}")
         return result

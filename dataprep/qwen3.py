@@ -23,17 +23,6 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
     return resample_poly(audio, target_rate // divisor, source_rate // divisor).astype(np.float32)
 
 
-class Qwen3TextTokenizer:
-    def __init__(self, tokenizer: Any):
-        self._tokenizer = tokenizer
-
-    def encode(self, text: str) -> list[int]:
-        return list(self._tokenizer.encode(text))
-
-    def decode(self, token_ids: Sequence[int]) -> str:
-        return str(self._tokenizer.decode(list(token_ids)))
-
-
 class Qwen3AudioCodec:
     sample_rate = 24_000
     frame_rate = 12.5
@@ -61,14 +50,14 @@ class Qwen3AudioCodec:
             raise ValueError(f"Expected mono audio, got {waveform.shape}")
         waveform = _resample(waveform, sample_rate, self.sample_rate)
         codes = self._codec.encode(mx.array(waveform)[None, None, :])
-        return codes[0, : self.num_codebooks]
+        return mx.transpose(codes[0, : self.num_codebooks], (1, 0))
 
     def decode(self, codes: Any):
         mx = _mx()
         codes = mx.array(codes)
-        if codes.ndim != 2 or codes.shape[0] != self.num_codebooks:
-            raise ValueError(f"Expected codes shaped ({self.num_codebooks}, F), got {codes.shape}")
-        audio, audio_lengths = self._codec.decode(mx.transpose(codes, (1, 0))[None])
+        if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
+            raise ValueError(f"Expected codes shaped (F, {self.num_codebooks}), got {codes.shape}")
+        audio, audio_lengths = self._codec.decode(codes[None])
         return audio[0, : int(audio_lengths[0].item())]
 
 
@@ -89,7 +78,7 @@ class Qwen3Tokenizer:
         self.voice = voice
         self.language = language
         self.audio_codec = Qwen3AudioCodec(model.speech_tokenizer)
-        self.text_tokenizer = Qwen3TextTokenizer(model.tokenizer)
+        self.text_tokenizer = model.tokenizer
         talker_config = model.config.talker_config
         self.max_seq_length = int(getattr(talker_config, "max_position_embeddings", 2048))
 
@@ -116,16 +105,16 @@ class Qwen3Tokenizer:
         masks = []
         spans: list[SequenceSpan] = []
         position = 0
-        rows = self.audio_codec.num_codebooks + 1
+        channels = self.audio_codec.num_codebooks + 1
         config = self._model.config.talker_config
 
         for segment_index, segment in enumerate(segments):
             chat = f"<|im_start|>assistant\n{segment.text}<|im_end|>\n<|im_start|>assistant\n"
-            text_ids = self.text_tokenizer.encode(chat)
-            text = mx.zeros((rows, len(text_ids)), dtype=mx.int32)
-            text[-1] = mx.array(text_ids, dtype=mx.int32)
+            text_ids = list(self.text_tokenizer.encode(chat))
+            text = mx.zeros((len(text_ids), channels), dtype=mx.int32)
+            text[:, -1] = mx.array(text_ids, dtype=mx.int32)
             text_mask = mx.zeros(text.shape, dtype=mx.bool_)
-            text_mask[-1] = True
+            text_mask[:, -1] = True
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
@@ -135,41 +124,41 @@ class Qwen3Tokenizer:
 
             if segment.audio_codes is not None:
                 prefix_ids = self._codec_prefix()
-                prefix = mx.zeros((rows, len(prefix_ids)), dtype=mx.int32)
-                prefix[0] = mx.array(prefix_ids, dtype=mx.int32)
+                prefix = mx.zeros((len(prefix_ids), channels), dtype=mx.int32)
+                prefix[:, 0] = mx.array(prefix_ids, dtype=mx.int32)
                 prefix_mask = mx.zeros(prefix.shape, dtype=mx.bool_)
-                prefix_mask[0] = True
+                prefix_mask[:, 0] = True
                 blocks.append(prefix)
                 masks.append(prefix_mask)
                 position += len(prefix_ids)
 
                 codes = mx.array(segment.audio_codes, dtype=mx.int32)
-                if codes.ndim != 2 or codes.shape[0] != self.audio_codec.num_codebooks:
+                if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
                     raise ValueError(
-                        f"Expected ({self.audio_codec.num_codebooks}, F) Qwen3 codes, got {codes.shape}"
+                        f"Expected (F, {self.audio_codec.num_codebooks}) Qwen3 codes, got {codes.shape}"
                     )
-                eos = mx.zeros((self.audio_codec.num_codebooks, 1), dtype=mx.int32)
+                eos = mx.zeros((1, self.audio_codec.num_codebooks), dtype=mx.int32)
                 eos[0, 0] = config.codec_eos_token_id
-                codes = mx.concatenate([codes, eos], axis=1)
-                audio = mx.zeros((rows, codes.shape[1]), dtype=mx.int32)
-                audio[:-1] = codes
+                codes = mx.concatenate([codes, eos], axis=0)
+                audio = mx.zeros((codes.shape[0], channels), dtype=mx.int32)
+                audio[:, :-1] = codes
                 audio_mask = mx.zeros(audio.shape, dtype=mx.bool_)
-                audio_mask[:-1] = True
+                audio_mask[:, :-1] = True
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(segment_index, position, position + codes.shape[1], "audio", segment.metadata)
+                    SequenceSpan(segment_index, position, position + codes.shape[0], "audio", segment.metadata)
                 )
-                position += codes.shape[1]
+                position += codes.shape[0]
 
         if not blocks:
             raise ValueError("At least one segment is required")
         result = TokenizedSequence(
-            tokens=mx.concatenate(blocks, axis=1),
-            mask=mx.concatenate(masks, axis=1),
+            tokens=mx.concatenate(blocks, axis=0),
+            mask=mx.concatenate(masks, axis=0),
             spans=spans,
         )
-        validate_sequence(result, self.audio_codec.num_codebooks)
+        validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
         if result.length > self.max_seq_length:
             raise ValueError(f"Sequence length {result.length} exceeds Qwen3 limit {self.max_seq_length}")
         return result

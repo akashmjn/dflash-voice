@@ -27,14 +27,10 @@ def test_prepared_single_segment_matches_saved_miso_entropy():
         pytest.skip("set DFLASH_RUN_MISO_FORWARD=1 to load Miso 8B")
 
     import torch
-    from generator import load_miso_8b, resolve_inference_config
+    from generator import load_llama3_tokenizer, load_miso_8b, resolve_inference_config
     from torchtune.modules.common_utils import disable_kv_cache
 
-    from dataprep.miso import (
-        MisoTextTokenizer,
-        MisoTokenizer,
-        build_teacher_forcing_batch,
-    )
+    from dataprep.miso import MisoTokenizer, build_teacher_forcing_batch
     from dataprep.tokenizer import Segment
 
     reference = json.loads((REFERENCE_ROOT / "miso_mimi_entropy.json").read_text())
@@ -50,21 +46,21 @@ def test_prepared_single_segment_matches_saved_miso_entropy():
     frame_rate = float(payload.get("frame_rate", 12.5))
     start = math.floor(float(turn["start_time_ms"]) * frame_rate / 1000)
     end = math.ceil(float(turn["end_time_ms"]) * frame_rate / 1000)
-    codes = full_codes[:, start:end].long()
+    codes = full_codes[:, start:end].long().transpose(0, 1).contiguous()
 
     class CodecInfo:
         num_codebooks = 32
         sample_rate = 24_000
         frame_rate = 12.5
 
-    tokenizer = MisoTokenizer(audio_codec=CodecInfo(), text_tokenizer=MisoTextTokenizer())
+    tokenizer = MisoTokenizer(audio_codec=CodecInfo(), text_tokenizer=load_llama3_tokenizer())
     prepared = tokenizer.apply_chat_template(
         [Segment(text=turn["text"], speaker=expected["speaker_id"], audio_codes=codes)]
     )
     batch = build_teacher_forcing_batch(prepared)
     tokens, token_mask, targets, target_mask, decoder_idx = batch
-    assert tokens.shape == (1, prepared.spans[0].end + codes.shape[1] - 1, 33)
-    assert decoder_idx.shape[1] == expected["num_frames"] == codes.shape[1]
+    assert tokens.shape == (1, prepared.spans[0].end + codes.shape[0] - 1, 33)
+    assert decoder_idx.shape[1] == expected["num_frames"] == codes.shape[0]
 
     config = resolve_inference_config(device=os.environ.get("MISO_FORWARD_DEVICE"))
     generator = load_miso_8b(device=config.model_device, dtype=config.dtype)
