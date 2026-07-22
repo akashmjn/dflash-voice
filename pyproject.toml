@@ -1,11 +1,7 @@
-[build-system]
-requires = ["setuptools>=68"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "dflash-voice"
 version = "0.1.0"
-description = "DFlash Voice: Block Diffusion for Flash TTS Speculative Decoding"
+description = "DFlash Voice: Accelerating RVQ audio token generation for TTS"
 requires-python = ">=3.10"
 dependencies = [
     "rich",
@@ -35,7 +31,6 @@ dev = [
     "modal",
 ]
 
-[dependency-groups]
 dataprep = [
     "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
     "soundfile",
@@ -51,18 +46,6 @@ dataprep-mlx = [
     "soundfile",
     "torch",
     "pytest",
-]
-
-[tool.uv]
-conflicts = [
-    [
-        { group = "dataprep" },
-        { group = "dataprep-mlx" },
-    ],
-    [
-        { group = "dataprep" },
-        { extra = "tts_mlx" },
-    ],
 ]
 
 [tool.pytest.ini_options]
