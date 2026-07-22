@@ -1,18 +1,10 @@
 import json
-import math
 import os
 from pathlib import Path
 
 import pytest
 
-
-REFERENCE_ROOT = Path(
-    os.environ.get(
-        "MISO_ENTROPY_REFERENCE",
-        Path(__file__).resolve().parents[3]
-        / "MisoTTS/mimi_entropy_work/expresso_row_0",
-    )
-)
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "miso_forward"
 
 
 def _entropy(logits):
@@ -22,8 +14,32 @@ def _entropy(logits):
     return -(log_probs.exp() * log_probs).sum(dim=-1)
 
 
+@pytest.fixture(scope="module")
+def miso_forward_reference():
+    """Segment-0 Expresso codes and saved Miso predictive entropy."""
+    import torch
+
+    meta = json.loads((FIXTURE_DIR / "segment0.json").read_text(encoding="utf-8"))
+    payload = torch.load(FIXTURE_DIR / "codes.pt", map_location="cpu", weights_only=True)
+    codes = payload["codes"].long()
+    segment = meta["segment"]
+    assert codes.ndim == 2 and codes.shape == (
+        meta["num_codebooks"],
+        segment["num_frames"],
+    )
+    return {
+        "meta": meta,
+        "segment": segment,
+        # Dataprep uses seq-major (F, C).
+        "codes": codes.transpose(0, 1).contiguous(),
+        "frame_rate": float(meta["frame_rate"]),
+        "sample_rate": int(meta["sample_rate"]),
+        "num_codebooks": int(meta["num_codebooks"]),
+    }
+
+
 @pytest.mark.integration
-def test_prepared_single_segment_matches_saved_miso_entropy():
+def test_prepared_single_segment_matches_saved_miso_entropy(miso_forward_reference):
     if os.environ.get("DFLASH_RUN_MISO_FORWARD") != "1":
         pytest.skip("set DFLASH_RUN_MISO_FORWARD=1 to load Miso 8B")
 
@@ -34,31 +50,25 @@ def test_prepared_single_segment_matches_saved_miso_entropy():
     from dataprep.miso import MisoTokenizer, build_teacher_forcing_batch
     from dataprep.tokenizer import Segment
 
-    reference = json.loads((REFERENCE_ROOT / "miso_mimi_entropy.json").read_text())
-    transcript = json.loads((REFERENCE_ROOT / "transcript.json").read_text())
-    expected = reference["turns"][0]
-    turn = transcript["turns"][expected["turn_index"]]
-    payload = torch.load(
-        REFERENCE_ROOT / f"channel_{expected['channel']}_mimi_codes.pt",
-        map_location="cpu",
-        weights_only=True,
-    )
-    full_codes = payload["codes"]
-    frame_rate = float(payload.get("frame_rate", 12.5))
-    start = math.floor(float(turn["start_time_ms"]) * frame_rate / 1000)
-    end = math.ceil(float(turn["end_time_ms"]) * frame_rate / 1000)
-    codes = full_codes[:, start:end].long().transpose(0, 1).contiguous()
+    expected = miso_forward_reference["segment"]
+    codes = miso_forward_reference["codes"]
 
     class CodecInfo:
-        num_codebooks = 32
-        sample_rate = 24_000
-        frame_rate = 12.5
+        num_codebooks = miso_forward_reference["num_codebooks"]
+        sample_rate = miso_forward_reference["sample_rate"]
+        frame_rate = miso_forward_reference["frame_rate"]
 
     tokenizer = MisoTokenizer(
         audio_codec=CodecInfo(), text_tokenizer=load_llama3_tokenizer()
     )
     prepared = tokenizer.apply_chat_template(
-        [Segment(text=turn["text"], speaker=expected["speaker_id"], audio_codes=codes)]
+        [
+            Segment(
+                text=expected["text"],
+                speaker=expected["speaker_id"],
+                audio_codes=codes,
+            )
+        ]
     )
     batch = build_teacher_forcing_batch(prepared)
     tokens, token_mask, targets, target_mask, decoder_idx = batch
