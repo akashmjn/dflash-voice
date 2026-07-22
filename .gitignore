@@ -35,3 +35,10 @@ tmp/
 benchmark_mlx/output
 benchmark_gpu/output
 
+# Dataprep downloads and generated artifacts
+data/**/raw/
+data/**/*_tokenized/
+
+# Lockfile (regenerate with `uv lock`)
+uv.lock
+
