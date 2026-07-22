@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
 
-from dataprep.expresso import download_expresso, load_raw_example, segment_frame_bounds
+from dataprep.expresso import download_expresso, load_raw_example
 from dataprep.tokenizer import Segment, TokenizedSequence
 
 
@@ -23,6 +24,19 @@ def _as_torch(value: Any):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     return torch.from_numpy(np.asarray(value)).cpu()
+
+
+def segment_frame_bounds(
+    segment: dict[str, Any],
+    *,
+    frame_rate: float,
+    max_frames: int,
+) -> tuple[int, int]:
+    start = max(0, int(math.floor(float(segment["start"]) * frame_rate)))
+    end = min(max_frames, int(math.ceil(float(segment["end"]) * frame_rate)))
+    if end <= start:
+        raise ValueError(f"Segment {segment.get('segment_id')} maps to empty codec frame range")
+    return start, end
 
 
 def load_tokenizer(model: str, model_id: str | None = None, device: str | None = None):
@@ -54,7 +68,7 @@ def _build_segments(example, channel_codes: list[Any], tokenizer) -> list[Segmen
         start_frame, end_frame = segment_frame_bounds(
             raw,
             frame_rate=tokenizer.audio_codec.frame_rate,
-            max_frames=int(codes.shape[1]),
+            max_frames=int(codes.shape[0]),
         )
         metadata = {
             "row": example.row,
@@ -71,14 +85,15 @@ def _build_segments(example, channel_codes: list[Any], tokenizer) -> list[Segmen
             Segment(
                 text=str(raw["text"]),
                 speaker=speaker_id,
-                audio_codes=codes[:, start_frame:end_frame],
+                audio_codes=codes[start_frame:end_frame],
                 metadata=metadata,
             )
         )
     return segments
 
 
-def _chunk_segments(segments: Sequence[Segment], tokenizer) -> list[TokenizedSequence]:
+def _pack_segments(segments: Sequence[Segment], tokenizer) -> list[TokenizedSequence]:
+    """Greedily group consecutive segments up to the model sequence limit."""
     chunks: list[TokenizedSequence] = []
     pending: list[Segment] = []
     for segment in segments:
@@ -98,6 +113,17 @@ def _chunk_segments(segments: Sequence[Segment], tokenizer) -> list[TokenizedSeq
     return chunks
 
 
+def _build_sequences(
+    segments: Sequence[Segment],
+    tokenizer,
+    *,
+    pack_segments: bool = False,
+) -> list[TokenizedSequence]:
+    if pack_segments:
+        return _pack_segments(segments, tokenizer)
+    return [tokenizer.apply_chat_template([segment]) for segment in segments]
+
+
 def _span_payload(span) -> dict[str, Any]:
     return {
         "segment_index": span.segment_index,
@@ -115,6 +141,7 @@ def prepare_row(
     tokenizer,
     output_root: str | Path = "data",
     verify_decode: bool = False,
+    pack_segments: bool = False,
 ) -> Path:
     import torch
 
@@ -137,7 +164,7 @@ def prepare_row(
     )
 
     segments = _build_segments(example, channel_codes, tokenizer)
-    sequences = _chunk_segments(segments, tokenizer)
+    sequences = _build_sequences(segments, tokenizer, pack_segments=pack_segments)
     torch.save([_as_torch(item.tokens).long() for item in sequences], output_dir / "sequences.pt")
     torch.save([_as_torch(item.mask).bool() for item in sequences], output_dir / "masks.pt")
 
@@ -150,6 +177,7 @@ def prepare_row(
         "num_codebooks": tokenizer.audio_codec.num_codebooks,
         "num_channels": example.num_channels,
         "num_segments": len(segments),
+        "pack_segments": pack_segments,
         "sequences": [
             {
                 "sequence_id": index,
@@ -164,7 +192,7 @@ def prepare_row(
     if verify_decode:
         for channel, codes in enumerate(channel_codes):
             check_frames = max(1, int(round(tokenizer.audio_codec.frame_rate * 5)))
-            decoded = np.asarray(tokenizer.audio_codec.decode(codes[:, :check_frames]))
+            decoded = np.asarray(tokenizer.audio_codec.decode(codes[:check_frames]))
             if decoded.size == 0 or not np.isfinite(decoded).all():
                 raise RuntimeError(f"{model} row {example.row} channel {channel} decode was empty/non-finite")
     return output_dir
@@ -178,6 +206,7 @@ def prepare_rows(
     model_id: str | None = None,
     device: str | None = None,
     verify_decode: bool = False,
+    pack_segments: bool = False,
 ) -> list[Path]:
     raw_root = Path(data_root) / "expresso" / "raw"
     missing = [row for row in rows if not (raw_root / str(row) / "transcript_segments.json").exists()]
@@ -191,27 +220,62 @@ def prepare_rows(
             tokenizer=tokenizer,
             output_root=data_root,
             verify_decode=verify_decode,
+            pack_segments=pack_segments,
         )
         for row in rows
     ]
 
 
+def resolve_prepare_rows(*, debug: int | None) -> list[int]:
+    """Select which Expresso rows to prepare.
+
+    Debug mode writes per-row raw/tokenized intermediates for the first N rows.
+    A non-debug full-dataset parquet export will be added later.
+    """
+    if debug is None:
+        raise NotImplementedError(
+            "Full-dataset parquet export is not implemented yet; pass --debug [N] "
+            "to prepare the first N rows with per-row intermediate files."
+        )
+    if debug < 1:
+        raise ValueError("--debug requires a positive row count")
+    return list(range(debug))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Prepare Expresso codebooks and flat TTS sequences.")
     parser.add_argument("--model", choices=("miso", "qwen3", "fish"), required=True)
-    parser.add_argument("--rows", type=int, nargs="+", default=[0, 1, 2])
+    parser.add_argument(
+        "--debug",
+        nargs="?",
+        const=3,
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Prepare the first N Expresso rows (default: 3) and write per-row raw "
+            "and tokenized intermediate files under data/. Without this flag, a "
+            "full-dataset parquet export will be used (not implemented yet)."
+        ),
+    )
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument("--verify-decode", action="store_true")
+    parser.add_argument(
+        "--pack-segments",
+        action="store_true",
+        help="Pack consecutive segments into sequences up to the model limit (default: one segment per sequence).",
+    )
     args = parser.parse_args()
     paths = prepare_rows(
-        args.rows,
+        resolve_prepare_rows(debug=args.debug),
         model=args.model,
         data_root=args.data_root,
         model_id=args.model_id,
         device=args.device,
         verify_decode=args.verify_decode,
+        pack_segments=args.pack_segments,
     )
     for path in paths:
         print(path)

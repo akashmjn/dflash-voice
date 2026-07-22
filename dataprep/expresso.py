@@ -175,18 +175,3 @@ def load_raw_example(row_dir: str | Path) -> tuple[RawExample, np.ndarray]:
         ),
         audio,
     )
-
-
-def segment_frame_bounds(
-    segment: dict[str, Any],
-    *,
-    frame_rate: float,
-    max_frames: int,
-) -> tuple[int, int]:
-    import math
-
-    start = max(0, int(math.floor(float(segment["start"]) * frame_rate)))
-    end = min(max_frames, int(math.ceil(float(segment["end"]) * frame_rate)))
-    if end <= start:
-        raise ValueError(f"Segment {segment.get('segment_id')} maps to empty codec frame range")
-    return start, end

@@ -18,11 +18,11 @@ data/
 
 `audio.wav` is channel-first when loaded by `dataprep.expresso`; transcript
 times are seconds and channels are zero-based. `codebooks.pt` stores a list of
-signed integer `(C, F)` tensors, one per source channel. `sequences.pt` stores
-variable-length `(C+1, L)` tensors and `masks.pt` stores matching boolean
-tensors. The final sequence row is the text lane for Miso and Qwen. Fish uses
-its native layout: row 0 contains text or offset semantic IDs and rows 1–10
-contain raw VQ IDs at audio positions.
+signed integer `(F, C)` tensors, one per source channel. `sequences.pt` stores
+variable-length `(L, C+1)` tensors and `masks.pt` stores matching boolean
+tensors. The final sequence channel is the text lane for Miso and Qwen. Fish uses
+its native layout transposed to seq-major form: channel 0 contains text or offset
+semantic IDs and channels 1–10 contain raw VQ IDs at audio positions.
 
 `metadata.json` records sequence shapes and maps each text/audio span back to
 the dataset row, speaker, channel, timestamps, and codec-frame range. Miso
@@ -42,24 +42,28 @@ uv pip install -e ../MisoTTS
 uv sync --group dataprep-mlx --no-default-groups
 ```
 
-## Prepare three rows
+## Prepare (debug)
 
-Run the single-segment Miso forward check before the complete Miso dataset:
+`--debug` prepares the first N Expresso rows (default 3) and writes the current
+per-row raw/tokenized intermediates. Full-dataset parquet export is not
+implemented yet and requires omitting `--debug`.
+
+Run the single-segment Miso forward check before a debug prepare:
 
 ```bash
 DFLASH_RUN_MISO_FORWARD=1 uv run --group dataprep \
   pytest dataprep/tests/test_miso_forward.py -m integration
 uv run --group dataprep python -m dataprep.prepare \
-  --model miso --rows 0 1 2 --verify-decode
+  --model miso --debug --verify-decode
 ```
 
 Then use a `dataprep-mlx` environment for Qwen3 and Fish:
 
 ```bash
 uv run --group dataprep-mlx python -m dataprep.prepare \
-  --model qwen3 --rows 0 1 2 --verify-decode
+  --model qwen3 --debug --verify-decode
 uv run --group dataprep-mlx python -m dataprep.prepare \
-  --model fish --rows 0 1 2 --verify-decode
+  --model fish --debug --verify-decode
 ```
 
 Downloaded and generated files are ignored by Git; this README is tracked.
