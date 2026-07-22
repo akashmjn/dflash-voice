@@ -1,0 +1,95 @@
+diff --git a/vllm_omni/model_executor/models/fish_speech/fish_speech_fast_ar.py b/vllm_omni/model_executor/models/fish_speech/fish_speech_fast_ar.py
+index cc38c200..ed4f73a3 100644
+--- a/vllm_omni/model_executor/models/fish_speech/fish_speech_fast_ar.py
++++ b/vllm_omni/model_executor/models/fish_speech/fish_speech_fast_ar.py
+@@ -17,6 +17,7 @@ Optimisations:
+ 
+ from __future__ import annotations
+ 
++import os
+ from collections.abc import Iterable
+ 
+ import torch
+@@ -42,6 +43,26 @@ from .configuration_fish_speech import FishSpeechFastARConfig, FishSpeechSlowARC
+ 
+ logger = init_logger(__name__)
+ 
++# ===================================================================
++#  Fast-AR depth-step ablation knob (benchmark_gpu/fish_depth_ablation.py)
++#
++#  Number of Fast-AR (depth decoder) forward passes to run per frame.
++#  9 == unmodified baseline (all residual codebooks). Read ONCE at import
++#  time so the value is frozen before CUDA-graph capture of stage 0 (the
++#  Fast AR runs graph-safe inside the Slow AR graph). Sweeping requires a
++#  fresh process per value; a runtime-mutable value would be silently
++#  ignored once the graph is captured. See the ablation brief §4/§5.2.
++# ===================================================================
++FISH_DEPTH_STEPS = min(int(os.environ.get("FISH_DEPTH_STEPS", "9")), 9)
++
++# Accumulated wall time (seconds) spent inside the depth loop, summed over
++# every forward in this process, plus a call counter. Only meaningful in the
++# eager (enforce_eager) arm -- under CUDA graphs the host-side timer does not
++# see true kernel time, so stage-0 wall time from the driver is authoritative.
++_DEPTH_LOOP_SECONDS = 0.0
++_DEPTH_LOOP_CALLS = 0
++_DEPTH_LOGGED = False
++
+ 
+ # ===================================================================
+ #  Standalone Fast AR Layers (no vLLM paged attention)
+@@ -414,6 +435,15 @@ class FishSpeechFastAR(nn.Module):
+         """
+         bsz = int(slow_ar_hidden.shape[0])
+         num_cb = self._num_codebooks
++
++        # Ablation: bound the number of residual (depth) forward passes.
++        # effective_cb is the exclusive loop bound; the loop runs for
++        # step in range(1, effective_cb), i.e. FISH_DEPTH_STEPS residual passes.
++        effective_cb = min(FISH_DEPTH_STEPS + 1, num_cb)
++        global _DEPTH_LOGGED
++        if not _DEPTH_LOGGED:
++            logger.warning("FISH_DEPTH_STEPS effective=%d (num_codebooks=%d)", FISH_DEPTH_STEPS, num_cb)
++            _DEPTH_LOGGED = True
+         device = slow_ar_hidden.device
+         dtype = slow_ar_hidden.dtype
+ 
+@@ -424,7 +454,10 @@ class FishSpeechFastAR(nn.Module):
+         # Clamp to valid range: im_end or other non-semantic tokens map to 0 (pad).
+         semantic_code = (semantic_token_id.reshape(bsz) - semantic_begin).clamp(min=0, max=codebook_size - 1)
+ 
+-        all_codes = torch.empty(bsz, num_cb, dtype=torch.long, device=device)
++        # Zero-init (not empty): truncated depth steps leave codebooks
++        # effective_cb..num_cb-1 unwritten; token id 0 is valid and lets the
++        # DAC decoder consume all num_cb layers without a shape error.
++        all_codes = torch.zeros(bsz, num_cb, dtype=torch.long, device=device)
+         all_codes[:, 0] = semantic_code
+ 
+         self._ensure_buffers(bsz, device, dtype)
+@@ -455,7 +488,11 @@ class FishSpeechFastAR(nn.Module):
+         # codebooks only have 1024 entries.  Truncate logits for steps > 0.
+         residual_codebook_size = 1024
+ 
+-        for step in range(1, num_cb):
++        global _DEPTH_LOOP_SECONDS, _DEPTH_LOOP_CALLS
++        import time as _time
++
++        _t_depth = _time.perf_counter()
++        for step in range(1, effective_cb):
+             seq_len = step + 1
+             step_input = embed_buf[:bsz, :seq_len, :]
+             # Use a dense 2D position tensor for every batch size; stride-0
+@@ -487,10 +524,13 @@ class FishSpeechFastAR(nn.Module):
+ 
+             all_codes[:, step] = next_ids.reshape(bsz)
+ 
+-            if step < num_cb - 1:
++            if step < effective_cb - 1:
+                 new_embed = self.fast_embeddings(next_ids.reshape(bsz))
+                 embed_buf[:bsz, step + 1, :] = new_embed
+ 
++        _DEPTH_LOOP_SECONDS += _time.perf_counter() - _t_depth
++        _DEPTH_LOOP_CALLS += 1
++
+         return all_codes
+ 
+     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:

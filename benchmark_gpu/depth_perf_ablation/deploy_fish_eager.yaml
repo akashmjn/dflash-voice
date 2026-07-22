@@ -1,0 +1,71 @@
+# Fish Speech S2 Pro deploy — EAGER variant for the depth-step ablation's "graphs=off" arm.
+#
+# Derived verbatim from vllm_omni/deploy/fish_qwen3_omni.yaml (vllm-omni @ c93359b)
+# with ONE deliberate change: stage 0 enforce_eager: true (was false). This bypasses
+# CUDA-graph capture of the Slow AR (and the graph-safe Fast AR depth loop nested in
+# it). The gap between this curve and the graphs-on curve IS the launch-overhead
+# contribution — a primary result (brief §5.3). Do NOT copy enforce_eager into the
+# graphs-on config.
+#
+# IMPORTANT: async_chunk STAYS true. The Fish pipeline (pipeline.py) only defines
+# async_chunk_process_next_stage_input_func and has NO sync_process_input_func, so
+# async_chunk:false fails pipeline validation for Fish. Stage-0 time is therefore
+# isolated via (a) the orchestrator's per-stage stage_first_ts/stage_last_ts timers
+# (log_stats=True), and (b) the in-engine _DEPTH_LOOP_SECONDS accumulator added by
+# patch_depth_loop.diff — NOT by running stages sequentially. See README.
+#
+# max_num_seqs raised to 32 so the scheduler can batch to the requested concurrency
+# (brief §6). gpu_memory_utilization is overridden by the driver at runtime.
+async_chunk: true
+enable_chunked_prefill: false
+
+connectors:
+  connector_of_shared_memory:
+    name: SharedMemoryConnector
+    extra:
+      shm_threshold_bytes: 65536
+      codec_streaming: true
+      connector_get_sleep_s: 0.01
+      connector_get_max_wait_first_chunk: 3000
+      connector_get_max_wait: 300
+      # ~21 Hz codec; 25 frames ≈ 1.16s of audio.
+      codec_chunk_frames: 25
+      codec_left_context_frames: 25
+      initial_codec_chunk_frames: 4
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 32
+    gpu_memory_utilization: 0.85
+    enforce_eager: true
+    async_scheduling: false
+    max_num_batched_tokens: 16384
+    max_model_len: 16384
+    devices: "0"
+    output_connectors:
+      to_stage_1: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.8
+      top_k: 30
+      top_p: 0.9
+      max_tokens: 2048
+      seed: 42
+      repetition_penalty: 1.0
+
+  - stage_id: 1
+    max_num_seqs: 1
+    gpu_memory_utilization: 0.1
+    enforce_eager: true
+    async_scheduling: false
+    max_num_batched_tokens: 16384
+    max_model_len: 16384
+    devices: "0"
+    input_connectors:
+      from_stage_0: connector_of_shared_memory
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 65536
+      seed: 42
+      repetition_penalty: 1.0
