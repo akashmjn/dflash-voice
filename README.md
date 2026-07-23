@@ -2,7 +2,7 @@
 
 The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally. 
 
-(for context, see Qwen3 TTS, Fish Audio S2 benchmark breakdown below).
+(for context, see breakdown for Qwen3 TTS, Fish Audio S2 models below).
 ![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
 This is currently actively WIP, and to read a little more about the motivation and approach meantime, see section [Why](#why) below.
