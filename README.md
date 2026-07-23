@@ -47,7 +47,7 @@ Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingfac
 
 ![Entropy vs RVQ codebook depth](docs/entropy-per-codebook.png)
 
-From an information theory lens: there is clearly a varying rate of information density, both across depth (RVQ audio codebooks - first plot) time (codec frames - plotted below). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to an autoregressive 1-4B LLM `backbone_semantic` predicting semantic codes across time and smaller 100-400M `depth_audio` decoders predicting audio RVQ codebooks across depth.
+From an information theory lens: there is clearly a varying rate of information density, both across depth (RVQ audio codebooks - first plot) and across time (codec frames - plotted below). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to an autoregressive 1-4B LLM `backbone_semantic` predicting semantic codes across time and smaller 100-400M `depth_audio` decoders predicting audio RVQ codebooks across depth.
 
 ![Entropy vs codec frames i.e. time](docs/entropy-per-frame.png)
 
