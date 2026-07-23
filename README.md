@@ -55,7 +55,7 @@ Given what we've seen above, and inspired by speculative decoding and flow match
 
 Specifically, I am exploring both discrete and continuous approaches to generating RVQ audio tokens faster.
 1. Discrete: block-diffusion inspired by speculative decoding methods like [DFlash](https://github.com/z-lab/dflash)
-2. Continuous: single-step flow matching inspired by [MeanFlows](https://github.com/Lyy-iiis/imeanflow)
+2. Continuous: single-step flow matching inspired by [MeanFlows](https://github.com/haidog-yaqub/MeanFlow)
 
 More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!
 
