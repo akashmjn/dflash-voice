@@ -1,6 +1,6 @@
 # dflash-voice: Accelerating RVQ audio codec generation
 
-The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
+The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally. See breakdown for 2 SoTA models (Qwen3 TTS, Fish Audio S2) below.
 
 ![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
