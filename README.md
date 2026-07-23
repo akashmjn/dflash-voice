@@ -1,14 +1,11 @@
-# dflash-voice
+# dflash-voice: Accelerating RVQ audio codec generation
 
-The goal of this project is to speed up TTS inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
+The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
 
 ![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
-## Current state
+This is currently WIP, to read a little more about the motivation and approach, see section [Why](#why) below.
 
-Readable MLX TTS inference and benchmarking for **Qwen3-TTS** and **Fish Audio S2 Pro**, ported from [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.4.4.
-
-Inference loop is ported to understand key components and benchmark per-frame timing (backbone_semantic vs depth_audio). Weights and `nn.Module` definitions still come from mlx-audio; `tts_mlx` owns prompt construction, autoregression, and codec decode in annotated, single-file modules.
 
 ## Install
 
@@ -24,10 +21,9 @@ Pinned deps match mlx-audio's tested stack (`mlx-lm==0.31.1`, `transformers==5.6
 # Will download models to HF_CACHE on first run
 python benchmark_mlx/bench_tts_mlx.py --backend qwen3
 python benchmark_mlx/bench_tts_mlx.py --backend fish
-
-# Compare output of ported inference loop against mlx-audio reference
-pytest tests/test_*_generate.py
 ```
+
+This will help reproduce benchmark results shown above on a local Apple Silicon laptop with MLX support.
 
 ## Benchmark results (per-codec-frame breakdown)
 
@@ -46,19 +42,23 @@ Raw metrics: (gitignored — regenerate with `benchmark_mlx/bench_tts_mlx.py`).
 
 This started after noticing an expensive memory bottleneck for audio tokens mentioned in the [Sesame CSM blog post](https://www.sesame.com/blog/crossing-the-uncanny-valley-of-voice). Why should audio tokens be comparably expensive to predict vs language tokens? Especially given the lower information density.
 
+Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes to generate 32 RVQ audio tokens?
+
 ![Entropy vs RVQ codebook depth](docs/entropy-per-codebook.png)
 
-Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes?
+From an information theory lens: there is clearly a varying rate of information density, both across depth (RVQ audio codebooks - first plot) time (codec frames - plotted below). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to an autoregressive 1-4B LLM `backbone_semantic` predicting semantic codes across time and smaller 100-400M `depth_audio` decoders predicting audio RVQ codebooks across depth.
 
 ![Entropy vs codec frames i.e. time](docs/entropy-per-frame.png)
 
-From an information theory lens: there is clearly a varying rate of information density, both across time (codec frames - plotted above) and depth (RVQ audio codebook depth - first plot). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to a autoregressive 1-4B LLM backbone predicting semantic codes across time and smaller decoders predicting audio RVQ codebooks across depth.
+Given what we've seen above, and inspired by speculative decoding and flow matching, it would be nice to get more bang for buck per model forward pass. Why not spend less compute on the easy stuff?
 
-Given what we've seen above, and inspired by speculative decoding and flow matching, it would be nice to get more bang for buck per model compute. Why not spend less compute on the easy stuff?
+Specifically, I am exploring both discrete and continuous approaches to generating RVQ audio tokens faster.
+1. Discrete: block-diffusion inspired by speculative decoding methods like [DFlash](https://github.com/z-lab/dflash)
+2. Continuous: single-step flow matching inspired by [MeanFlows](https://github.com/Lyy-iiis/imeanflow)
 
-More to come here soon. Feel free to [reach me](https://akashmjn.me/) if you've any thoughts!
+More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!
 
-> P.S.: repo naming was originally motivated by speculative decoding methods like [DFlash](https://github.com/z-lab/dflash) for TTS models. However turns out specdec for TTS is complicated by the dual-RVQ (semantic + audio) codec structure used by most models. The current focus is on a narrower bottleneck: speeding up/simplifying audio codec generation to begin. Will revisit/rename appropriately :)
+> P.S.: original project motivation (and repo naming) was the question: how can we do speculative decoding for TTS/multimodal voice models? Turns out specdec for TTS is complicated by the dual-RVQ (semantic backbone + audio depth decoder) codec structure used by most SoTA models. So the initial project focus is first on a narrower bottleneck: training models to speed up/simplify RVQ audio codec generation to begin. Will revisit/rename appropriately based on progress :)
 
 ## Citation
 
@@ -66,7 +66,7 @@ If you use this repository, please cite:
 
 ```bibtex
 @misc{mahajan2026dflashvoice,
-  title        = {dflash-voice: Speeding up RVQ audio codec generation for TTS},
+  title        = {dflash-voice: Accelerating RVQ audio codec generation for TTS},
   author       = {Mahajan, Akash},
   year         = {2026},
   howpublished = {GitHub},
