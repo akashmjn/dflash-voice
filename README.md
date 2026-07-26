@@ -3,7 +3,7 @@
 The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally. 
 
 (for context, see breakdown for Qwen3 TTS, Fish Audio S2 models below).
-TTS MLX benchmark aggregate
+![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
 > Currently actively WIP: to read a little more about the motivation and approach meantime, see section [Why](#why) below.
 
@@ -46,11 +46,11 @@ This started after noticing an expensive memory bottleneck for audio tokens ment
 
 Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes to generate 32 RVQ audio tokens?
 
-Entropy vs RVQ codebook depth
+![Entropy vs RVQ codebook depth](docs/entropy-per-codebook.png)
 
 From an information theory lens: there is clearly a varying rate of information density, both across depth (RVQ audio codebooks - first plot) and across time (codec frames - plotted below). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to an autoregressive 1-4B LLM `backbone_semantic` predicting semantic codes across time and smaller 100-400M `depth_audio` decoders predicting audio RVQ codebooks across depth.
 
-Entropy vs codec frames i.e. time
+![Entropy vs codec frames i.e. time](docs/entropy-per-frame.png)
 
 Given what we've seen above, and inspired by speculative decoding and flow matching, it would be nice to get more bang for buck per model forward pass. Why not spend less compute on the easy stuff?
 
