@@ -15,6 +15,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["tts_mlx*"]
+exclude = ["tts_mlx.tests*"]
 
 [project.optional-dependencies]
 tts_mlx = [
