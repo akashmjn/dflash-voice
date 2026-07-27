@@ -1,0 +1,13 @@
+{
+  "feature_length": 363,
+  "pred_slice_len": 297,
+  "hiddens_shape": [
+    363,
+    4096
+  ],
+  "logits0_shape": [
+    363,
+    2051
+  ],
+  "num_logits": 32
+}

@@ -1,0 +1,33 @@
+{
+  "length": 582,
+  "layout": {
+    "num_codebooks": 10,
+    "text_channel": 0
+  },
+  "spans": [
+    [
+      "special",
+      0,
+      81
+    ],
+    [
+      "audio",
+      81,
+      580
+    ],
+    [
+      "special",
+      580,
+      582
+    ]
+  ],
+  "audio_frames": 499,
+  "tokens_shape": [
+    582,
+    11
+  ],
+  "mask_shape": [
+    582,
+    11
+  ]
+}

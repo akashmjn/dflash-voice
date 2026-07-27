@@ -1,7 +1,7 @@
 [project]
 name = "dflash-voice"
 version = "0.1.0"
-description = "DFlash Voice: Block Diffusion for Flash TTS Speculative Decoding"
+description = "DFlash Voice: Accelerating RVQ audio token generation for TTS"
 requires-python = ">=3.10"
 dependencies = [
     "rich",
@@ -14,8 +14,8 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["tts_mlx*"]
-exclude = ["tts_mlx.tests*"]
+include = ["tts_mlx*", "dataprep*"]
+exclude = ["tts_mlx.tests*", "dataprep.tests*"]
 
 [project.optional-dependencies]
 tts_mlx = [
@@ -31,7 +31,27 @@ dev = [
     "modal",
 ]
 
+dataprep = [
+    "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
+    "soundfile",
+    "pytest",
+]
+dataprep-mlx = [
+    "mlx>=0.31.1",
+    "mlx-lm==0.31.1",
+    "mlx-audio==0.4.4",
+    "transformers==5.6.0",
+    "huggingface-hub==1.5.0",
+    "scipy",
+    "soundfile",
+    "torch",
+    "pytest",
+    "marimo",
+    "altair",
+]
+
 [tool.pytest.ini_options]
+addopts = "-m 'not expensive'"
 markers = [
-    "integration: downloads models and runs end-to-end inference",
+    "expensive: loads full models for dataprep featurization or entropy checks",
 ]
