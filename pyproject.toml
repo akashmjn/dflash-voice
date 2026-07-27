@@ -46,6 +46,8 @@ dataprep-mlx = [
     "soundfile",
     "torch",
     "pytest",
+    "marimo",
+    "altair",
 ]
 
 [tool.pytest.ini_options]

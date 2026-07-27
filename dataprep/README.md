@@ -14,6 +14,14 @@ data/
       sequences.pt
       masks.pt
       metadata.json
+    MODEL_featurized/ROW/
+      logits.pt
+      hiddens.pt
+      metadata.json
+      kv_context.pt  # only with --dump-kv
+    MODEL_entropy/ROW/          # from notebooks/entropy_compute.py
+      entropy.npz               # per-frame entropy + positions
+      entropy.json              # means, spans, offsets into the npz
 ```
 
 `audio.wav` is channel-first when loaded by `dataprep.expresso`; transcript
@@ -28,6 +36,11 @@ semantic IDs and channels 1–10 contain raw VQ IDs at audio positions.
 the dataset row, speaker, channel, timestamps, and codec-frame range. Miso
 adds an all-zero audio EOS frame; Qwen uses its configured codec EOS; Fish
 framing comes from `Conversation.encode_for_inference`.
+
+Featurization replays each saved `TokenizedSequence` with ground-truth audio
+tokens. `logits.pt` is a list of dictionaries keyed by codebook because the
+semantic and residual vocabularies can differ. Hidden states and logits contain
+only real audio target frames.
 
 ## Environments
 
@@ -44,26 +57,3 @@ uv pip install -e ../MisoTTS
 # Qwen3 / Fish MLX stack (replaces the Miso pins above)
 uv pip install -e ".[dataprep-mlx]"
 ```
-
-## Prepare (debug)
-
-`--debug` prepares the first N Expresso rows (default 3) and writes the current
-per-row raw/tokenized intermediates. Full-dataset parquet export is not
-implemented yet and requires omitting `--debug`.
-
-Run the single-segment Miso forward check before a debug prepare (Miso env):
-
-```bash
-DFLASH_RUN_MISO_FORWARD=1 pytest dataprep/tests/test_miso_forward.py -m integration
-python -m dataprep.prepare --model miso --debug --verify-decode
-```
-
-Then switch to the MLX dataprep extra for Qwen3 and Fish:
-
-```bash
-uv pip install -e ".[dataprep-mlx]"
-python -m dataprep.prepare --model qwen3 --debug --verify-decode
-python -m dataprep.prepare --model fish --debug --verify-decode
-```
-
-Downloaded and generated files are ignored by Git; this README is tracked.
