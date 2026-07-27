@@ -5,7 +5,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from dataprep.tokenizer import (
+from dataprep.common import (
+    ForwardFeatures,
     Segment,
     SequenceSpan,
     TokenizedSequence,
@@ -74,6 +75,204 @@ class Qwen3AudioCodec:
         return audio[0, : int(audio_lengths[0].item())]
 
 
+class Qwen3Featurizer:
+    """Replay Qwen3-TTS generation with ground-truth codec frames."""
+
+    num_codebooks = 16
+
+    def __init__(self, model: Any):
+        self._model = model
+
+    def _prepare_segment(
+        self,
+        tokens,
+        *,
+        text_span: SequenceSpan,
+        audio_span: SequenceSpan,
+    ):
+        mx = _mx()
+        model = self._model
+        text_ids = tokens[text_span.start : text_span.end, -1][None, :]
+        text_embed = model.talker.text_projection(
+            model.talker.get_text_embeddings()(text_ids)
+        )
+
+        tts_tokens = mx.array(
+            [
+                [
+                    model.config.tts_bos_token_id,
+                    model.config.tts_eos_token_id,
+                    model.config.tts_pad_token_id,
+                ]
+            ],
+            dtype=mx.int32,
+        )
+        tts_embeds = model.talker.text_projection(
+            model.talker.get_text_embeddings()(tts_tokens)
+        )
+        tts_bos, tts_eos, tts_pad = (
+            tts_embeds[:, 0:1],
+            tts_embeds[:, 1:2],
+            tts_embeds[:, 2:3],
+        )
+
+        prefix_ids = tokens[text_span.end : audio_span.start, 0][None, :]
+        codec_embed = model.talker.get_input_embeddings()(prefix_ids)
+        if int(codec_embed.shape[1]) < 2:
+            raise ValueError("Qwen3 codec prefix is missing pad/BOS tokens")
+        pad_count = int(codec_embed.shape[1]) - 2
+        combined = mx.concatenate(
+            [
+                mx.broadcast_to(
+                    tts_pad, (1, pad_count, int(tts_pad.shape[-1]))
+                ),
+                tts_bos,
+            ],
+            axis=1,
+        )
+        input_embeds = mx.concatenate(
+            [
+                text_embed[:, :3],
+                combined + codec_embed[:, :-1],
+                text_embed[:, 3:4] + codec_embed[:, -1:],
+            ],
+            axis=1,
+        )
+        text_stream = mx.concatenate([text_embed[:, 4:-5], tts_eos], axis=1)
+        return input_embeds, text_stream, tts_pad
+
+    def featurize(
+        self, sequence: TokenizedSequence, *, include_kv: bool = False
+    ) -> ForwardFeatures:
+        mx = _mx()
+        validate_sequence(sequence, self.num_codebooks, text_channel=-1)
+        tokens = mx.array(sequence.tokens, dtype=mx.int32)
+        config = self._model.config.talker_config
+
+        spans_by_segment: dict[int, dict[str, SequenceSpan]] = {}
+        for span in sequence.spans:
+            spans_by_segment.setdefault(span.segment_index, {})[span.kind] = span
+
+        all_positions = []
+        all_targets = []
+        all_hiddens = []
+        all_logits: dict[int, list[Any]] = {
+            index: [] for index in range(self.num_codebooks)
+        }
+        saved_caches = []
+
+        for segment_index in sorted(spans_by_segment):
+            spans = spans_by_segment[segment_index]
+            if "text" not in spans or "audio" not in spans:
+                continue
+            text_span, audio_span = spans["text"], spans["audio"]
+            e_t, text_stream, text_pad = self._prepare_segment(
+                tokens, text_span=text_span, audio_span=audio_span
+            )
+            target_values = np.asarray(sequence.tokens)[
+                audio_span.start : audio_span.end, :-1
+            ]
+            keep = target_values[:, 0] != config.codec_eos_token_id
+            positions = mx.array(
+                np.arange(audio_span.start, audio_span.end)[keep],
+                dtype=mx.int32,
+            )
+            targets = mx.array(target_values[keep], dtype=mx.int32)
+            if int(targets.shape[0]) == 0:
+                continue
+
+            talker_cache = self._model.talker.make_cache()
+            segment_hiddens = []
+            segment_logits: dict[int, list[Any]] = {
+                index: [] for index in range(self.num_codebooks)
+            }
+            for frame_index in range(int(targets.shape[0])):
+                semantic_logits, hidden = self._model.talker(
+                    e_t, cache=talker_cache
+                )
+                semantic = targets[frame_index : frame_index + 1, 0:1]
+                residuals = targets[frame_index : frame_index + 1, 1:]
+                segment_logits[0].append(semantic_logits[:, -1])
+                segment_hiddens.append(hidden[:, -1])
+
+                depth_cache = self._model.talker.code_predictor.make_cache()
+                depth_input = mx.concatenate(
+                    [
+                        hidden[:, -1:],
+                        self._model.talker.get_input_embeddings()(semantic),
+                    ],
+                    axis=1,
+                )
+                for codebook in range(1, self.num_codebooks):
+                    depth_logits, depth_cache, _ = (
+                        self._model.talker.code_predictor(
+                            depth_input,
+                            cache=depth_cache,
+                            generation_step=codebook - 1,
+                        )
+                    )
+                    segment_logits[codebook].append(depth_logits[:, -1])
+                    if codebook < self.num_codebooks - 1:
+                        depth_input = (
+                            self._model.talker.code_predictor.codec_embedding[
+                                codebook - 1
+                            ](residuals[:, codebook - 1 : codebook])
+                        )
+
+                if frame_index < int(text_stream.shape[1]):
+                    text_embed = text_stream[:, frame_index : frame_index + 1]
+                else:
+                    text_embed = text_pad
+                codec_embed = self._model.talker.get_input_embeddings()(semantic)
+                for codebook in range(1, self.num_codebooks):
+                    codec_embed = codec_embed + (
+                        self._model.talker.code_predictor.codec_embedding[
+                            codebook - 1
+                        ](residuals[:, codebook - 1 : codebook])
+                    )
+                e_t = text_embed + codec_embed
+
+            all_positions.append(positions)
+            all_targets.append(targets)
+            all_hiddens.append(mx.concatenate(segment_hiddens, axis=0))
+            for codebook in range(self.num_codebooks):
+                all_logits[codebook].append(
+                    mx.concatenate(segment_logits[codebook], axis=0)
+                )
+            if include_kv:
+                saved_caches.append(
+                    [(layer.keys, layer.values) for layer in talker_cache]
+                )
+
+        if not all_targets:
+            raise ValueError("Qwen3 sequence contains no non-EOS audio frames")
+        positions = mx.concatenate(all_positions, axis=0)
+        targets = mx.concatenate(all_targets, axis=0)
+        hiddens = mx.concatenate(all_hiddens, axis=0)
+        logits = {
+            codebook: mx.concatenate(chunks, axis=0)
+            for codebook, chunks in all_logits.items()
+        }
+        mx.eval(positions, targets, hiddens, *logits.values())
+        if include_kv:
+            mx.eval(
+                *[
+                    value
+                    for segment_cache in saved_caches
+                    for layer in segment_cache
+                    for value in layer
+                    if value is not None
+                ]
+            )
+        return ForwardFeatures(
+            logits=logits,
+            hiddens=hiddens,
+            audio_positions=positions,
+            targets=targets,
+            kv_cache=saved_caches if include_kv else None,
+        )
+
+
 class Qwen3Tokenizer:
     def __init__(
         self,
@@ -92,6 +291,7 @@ class Qwen3Tokenizer:
         self.language = language
         self.audio_codec = Qwen3AudioCodec(model.speech_tokenizer)
         self.text_tokenizer = model.tokenizer
+        self.featurizer = Qwen3Featurizer(model)
         talker_config = model.config.talker_config
         self.max_seq_length = int(
             getattr(talker_config, "max_position_embeddings", 2048)

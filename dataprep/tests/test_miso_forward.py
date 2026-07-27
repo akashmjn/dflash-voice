@@ -40,15 +40,13 @@ def miso_forward_reference():
 
 @pytest.mark.integration
 def test_prepared_single_segment_matches_saved_miso_entropy(miso_forward_reference):
-    if os.environ.get("DFLASH_RUN_MISO_FORWARD") != "1":
-        pytest.skip("set DFLASH_RUN_MISO_FORWARD=1 to load Miso 8B")
+    if os.environ.get("PYTEST_MISO_FEATURIZE") != "1":
+        pytest.skip("set PYTEST_MISO_FEATURIZE=1 to load Miso 8B")
 
     import torch
     from generator import load_llama3_tokenizer, load_miso_8b, resolve_inference_config
-    from torchtune.modules.common_utils import disable_kv_cache
-
-    from dataprep.miso import MisoTokenizer, build_teacher_forcing_batch
-    from dataprep.tokenizer import Segment
+    from dataprep.miso import MisoFeaturizer, MisoTokenizer, build_teacher_forcing_batch
+    from dataprep.common import Segment
 
     expected = miso_forward_reference["segment"]
     codes = miso_forward_reference["codes"]
@@ -77,18 +75,10 @@ def test_prepared_single_segment_matches_saved_miso_entropy(miso_forward_referen
 
     config = resolve_inference_config(device=os.environ.get("MISO_FORWARD_DEVICE"))
     generator = load_miso_8b(device=config.model_device, dtype=config.dtype)
-    device_batch = [value.to(generator.model_device) for value in batch]
-    with (
-        torch.inference_mode(),
-        disable_kv_cache(generator._model.backbone),
-        disable_kv_cache(generator._model.decoder),
-    ):
-        c0_logits, c1_logits, *_ = generator._model.forward(*device_batch)
-
-    target_positions = device_batch[-1][0]
-    c0 = _entropy(c0_logits)[0, target_positions]
-    c1 = _entropy(c1_logits)[0]
-    actual = torch.cat([c0[:, None], c1], dim=1).cpu()
+    features = MisoFeaturizer(generator).featurize(prepared)
+    actual = torch.stack(
+        [_entropy(features.logits[index]) for index in range(32)], dim=1
+    )
     saved = torch.tensor(expected["codebook_entropy_per_frame"], dtype=torch.float32)
     assert actual.shape == saved.shape == (expected["num_frames"], 32)
     torch.testing.assert_close(actual, saved, atol=3e-3, rtol=3e-3)

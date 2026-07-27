@@ -5,7 +5,8 @@ from typing import Any, Sequence
 
 import numpy as np
 
-from dataprep.tokenizer import (
+from dataprep.common import (
+    ForwardFeatures,
     Segment,
     SequenceSpan,
     TokenizedSequence,
@@ -79,6 +80,81 @@ class FishAudioCodec:
         return mx.concatenate(chunks)
 
 
+class FishFeaturizer:
+    """Teacher-force Fish's slow and fast autoregressive transformers."""
+
+    num_codebooks = 10
+
+    def __init__(self, model: Any):
+        self._model = model
+
+    def featurize(
+        self, sequence: TokenizedSequence, *, include_kv: bool = False
+    ) -> ForwardFeatures:
+        mx = _mx()
+        tokens = mx.array(sequence.tokens, dtype=mx.int32)
+        validate_sequence(sequence, self.num_codebooks, text_channel=0)
+
+        audio_positions = mx.array(
+            np.flatnonzero(np.asarray(sequence.mask)[:, 1:].any(axis=1)),
+            dtype=mx.int32,
+        )
+        if int(audio_positions.shape[0]) == 0:
+            raise ValueError("Fish sequence contains no audio frames")
+        if bool(mx.any(audio_positions == 0).item()):
+            raise ValueError("Fish audio targets require a preceding context token")
+
+        # Fish's native model layout is (batch, channels, sequence). Position t
+        # predicts the semantic token and residual codebooks at position t + 1.
+        model_input = mx.transpose(tokens, (1, 0))[None, :, :]
+        cache = self._model.model.make_cache() if include_kv else None
+        result = self._model.model(model_input, cache=cache)
+        source_positions = audio_positions - 1
+        slow_logits = result.logits[0, source_positions]
+        slow_hiddens = result.hidden_states[0, source_positions]
+        targets = tokens[audio_positions, 1:]
+
+        if self._model.semantic_logit_bias is None:
+            raise ValueError("Fish semantic logit bias is not initialized")
+        semantic_logits = slow_logits + self._model.semantic_logit_bias.astype(
+            slow_logits.dtype
+        )
+        logits = {0: semantic_logits}
+        for codebook in range(1, self.num_codebooks):
+            logits[codebook] = self._model.model.fast_forward(
+                slow_hiddens, targets[:, :codebook]
+            )
+
+        mx.eval(*logits.values(), slow_hiddens, targets, audio_positions)
+        kv_cache = None
+        if cache is not None:
+            kv_cache = [(layer.keys, layer.values) for layer in cache]
+            mx.eval(
+                *[
+                    value
+                    for layer in kv_cache
+                    for value in layer
+                    if value is not None
+                ]
+            )
+
+        semantic_targets = tokens[audio_positions, 0]
+        config = self._model.config
+        valid_semantic = (
+            semantic_targets >= config.semantic_start_token_id
+        ) & (semantic_targets <= config.semantic_end_token_id)
+        if not bool(mx.all(valid_semantic).item()):
+            raise ValueError("Fish audio mask includes a non-semantic target token")
+
+        return ForwardFeatures(
+            logits=logits,
+            hiddens=slow_hiddens,
+            audio_positions=audio_positions,
+            targets=targets,
+            kv_cache=kv_cache,
+        )
+
+
 class FishTokenizer:
     def __init__(
         self,
@@ -93,6 +169,7 @@ class FishTokenizer:
         self._model = model
         self.audio_codec = FishAudioCodec(model.codec)
         self.text_tokenizer = model.tokenizer
+        self.featurizer = FishFeaturizer(model)
         self.max_seq_length = int(
             getattr(
                 model.config, "max_seq_len", getattr(model.config, "max_length", 32_768)

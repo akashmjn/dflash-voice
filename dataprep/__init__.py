@@ -1,4 +1,6 @@
-from dataprep.tokenizer import (
+from dataprep.common import (
+    Featurizer,
+    ForwardFeatures,
     Segment,
     SequenceSpan,
     TokenizedSequence,
@@ -6,6 +8,8 @@ from dataprep.tokenizer import (
 )
 
 __all__ = [
+    "Featurizer",
+    "ForwardFeatures",
     "Segment",
     "SequenceSpan",
     "TokenizedSequence",

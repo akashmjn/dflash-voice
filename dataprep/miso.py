@@ -6,7 +6,8 @@ from typing import Any, Sequence
 # Moshi decode on Apple MPS needs this before Torch initializes MPS kernels.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
-from dataprep.tokenizer import (
+from dataprep.common import (
+    ForwardFeatures,
     Segment,
     SequenceSpan,
     TokenizedSequence,
@@ -120,6 +121,116 @@ class MisoAudioCodec:
         return torch.cat(frames, dim=-1).squeeze(0).squeeze(0)
 
 
+class MisoFeaturizer:
+    """Teacher-force MisoTTS without enabling its inference KV caches."""
+
+    num_codebooks = 32
+
+    def __init__(self, generator: Any | None = None, *, device: str | None = None):
+        self._generator = generator
+        self.device = device
+
+    def _load_generator(self):
+        if self._generator is None:
+            from generator import load_miso_8b, resolve_inference_config
+
+            config = resolve_inference_config(device=self.device)
+            self._generator = load_miso_8b(
+                device=config.model_device, dtype=config.dtype
+            )
+        return self._generator
+
+    def featurize(
+        self, sequence: TokenizedSequence, *, include_kv: bool = False
+    ) -> ForwardFeatures:
+        if include_kv:
+            raise NotImplementedError(
+                "Miso teacher-forced KV export is not available with disabled caches"
+            )
+        torch = _torch()
+        from torchtune.modules.common_utils import disable_kv_cache
+
+        batch = build_teacher_forcing_batch(sequence)
+        generator = self._load_generator()
+        model = generator._model
+        tokens, token_mask, targets, target_mask, decoder_idx = [
+            value.to(generator.model_device) for value in batch
+        ]
+        del target_mask
+
+        with (
+            torch.inference_mode(),
+            disable_kv_cache(model.backbone),
+            disable_kv_cache(model.decoder),
+        ):
+            dtype = next(model.parameters()).dtype
+            batch_size, _, channels = tokens.shape
+            num_codebooks = channels - 1
+            num_frames = decoder_idx.shape[1]
+            embeds = model._embed_tokens(tokens)
+            hiddens = model.backbone(
+                (embeds * token_mask.unsqueeze(-1)).sum(dim=2)
+            ).to(dtype=dtype)
+            semantic_logits = model.codebook0_head(hiddens)
+
+            target_frame = torch.cat(
+                [
+                    targets,
+                    torch.zeros(
+                        batch_size,
+                        targets.shape[1],
+                        1,
+                        device=targets.device,
+                        dtype=targets.dtype,
+                    ),
+                ],
+                dim=2,
+            )
+            target_embeds = model._embed_tokens(target_frame)
+            decoder_input = torch.cat(
+                [hiddens.unsqueeze(2), target_embeds[:, :, :-2, :]], dim=2
+            )
+            gather_idx = decoder_idx.view(
+                batch_size, num_frames, 1, 1
+            ).expand(
+                batch_size,
+                num_frames,
+                num_codebooks,
+                decoder_input.shape[-1],
+            )
+            decoder_input = torch.gather(
+                decoder_input, dim=1, index=gather_idx
+            )
+            decoder_h = model.decoder(
+                model.projection(decoder_input)
+                .view(batch_size * num_frames, num_codebooks, -1)
+                .to(dtype=dtype)
+            ).view(batch_size, num_frames, num_codebooks, -1)
+            residual_logits = torch.einsum(
+                "bsid,idv->bsiv", decoder_h[:, :, 1:, :], model.audio_head
+            )
+
+        target_positions = decoder_idx[0]
+        audio_span = next(span for span in sequence.spans if span.kind == "audio")
+        audio_positions = torch.arange(
+            audio_span.start, audio_span.end - 1, dtype=torch.long
+        )
+        frame_targets = torch.as_tensor(sequence.tokens)[audio_positions, :-1]
+        logits = {0: semantic_logits[0, target_positions].cpu()}
+        logits.update(
+            {
+                codebook: residual_logits[0, :, codebook - 1].cpu()
+                for codebook in range(1, self.num_codebooks)
+            }
+        )
+        return ForwardFeatures(
+            logits=logits,
+            hiddens=hiddens[0, target_positions].cpu(),
+            audio_positions=audio_positions,
+            targets=frame_targets.cpu(),
+        )
+
+
 class MisoTokenizer:
     max_seq_length = 2048
 
@@ -127,9 +238,11 @@ class MisoTokenizer:
         self,
         audio_codec: MisoAudioCodec | None = None,
         text_tokenizer: Any | None = None,
+        featurizer: MisoFeaturizer | None = None,
     ):
         self.audio_codec = audio_codec or MisoAudioCodec()
         self.text_tokenizer = _load_text_tokenizer(text_tokenizer)
+        self.featurizer = featurizer or MisoFeaturizer()
 
     def apply_chat_template(self, segments: Sequence[Segment]) -> TokenizedSequence:
         torch = _torch()

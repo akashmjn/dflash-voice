@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from dataprep.tokenizer import SequenceSpan, TokenizedSequence, validate_sequence
+from dataprep.common import SequenceSpan, TokenizedSequence, validate_sequence
 
 
 def test_seq_channel_layout_and_mask_consistency():

@@ -38,6 +38,17 @@ class TokenizedSequence:
         return int(self.tokens.shape[0])
 
 
+@dataclass
+class ForwardFeatures:
+    """Teacher-forced outputs aligned to the sequence's audio target frames."""
+
+    logits: dict[int, Any]
+    hiddens: Any
+    audio_positions: Any
+    targets: Any
+    kv_cache: Any | None = None
+
+
 @runtime_checkable
 class AudioCodec(Protocol):
     sample_rate: int
@@ -64,6 +75,15 @@ class Tokenizer(Protocol):
     max_seq_length: int
 
     def apply_chat_template(self, segments: Sequence[Segment]) -> TokenizedSequence: ...
+
+
+@runtime_checkable
+class Featurizer(Protocol):
+    num_codebooks: int
+
+    def featurize(
+        self, sequence: TokenizedSequence, *, include_kv: bool = False
+    ) -> ForwardFeatures: ...
 
 
 def _as_numpy(value: Any) -> np.ndarray:

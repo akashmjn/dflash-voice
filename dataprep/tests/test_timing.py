@@ -4,7 +4,7 @@ from dataprep.prepare import (
     resolve_prepare_rows,
     segment_frame_bounds,
 )
-from dataprep.tokenizer import Segment
+from dataprep.common import Segment
 import pytest
 
 
