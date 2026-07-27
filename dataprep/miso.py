@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 # Moshi decode on Apple MPS needs this before Torch initializes MPS kernels.
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 from dataprep.common import (
-    ForwardFeatures,
+    FeaturizedSequence,
     Segment,
-    SequenceSpan,
+    TokenizedSequenceLayout,
+    TokenSequenceSpan,
+    SpanKind,
     TokenizedSequence,
-    validate_sequence,
 )
 
 
@@ -142,7 +143,7 @@ class MisoFeaturizer:
 
     def featurize(
         self, sequence: TokenizedSequence, *, include_kv: bool = False
-    ) -> ForwardFeatures:
+    ) -> FeaturizedSequence:
         if include_kv:
             raise NotImplementedError(
                 "Miso teacher-forced KV export is not available with disabled caches"
@@ -168,9 +169,9 @@ class MisoFeaturizer:
             num_codebooks = channels - 1
             num_frames = decoder_idx.shape[1]
             embeds = model._embed_tokens(tokens)
-            hiddens = model.backbone(
-                (embeds * token_mask.unsqueeze(-1)).sum(dim=2)
-            ).to(dtype=dtype)
+            hiddens = model.backbone((embeds * token_mask.unsqueeze(-1)).sum(dim=2)).to(
+                dtype=dtype
+            )
             semantic_logits = model.codebook0_head(hiddens)
 
             target_frame = torch.cat(
@@ -190,17 +191,13 @@ class MisoFeaturizer:
             decoder_input = torch.cat(
                 [hiddens.unsqueeze(2), target_embeds[:, :, :-2, :]], dim=2
             )
-            gather_idx = decoder_idx.view(
-                batch_size, num_frames, 1, 1
-            ).expand(
+            gather_idx = decoder_idx.view(batch_size, num_frames, 1, 1).expand(
                 batch_size,
                 num_frames,
                 num_codebooks,
                 decoder_input.shape[-1],
             )
-            decoder_input = torch.gather(
-                decoder_input, dim=1, index=gather_idx
-            )
+            decoder_input = torch.gather(decoder_input, dim=1, index=gather_idx)
             decoder_h = model.decoder(
                 model.projection(decoder_input)
                 .view(batch_size * num_frames, num_codebooks, -1)
@@ -210,24 +207,42 @@ class MisoFeaturizer:
                 "bsid,idv->bsiv", decoder_h[:, :, 1:, :], model.audio_head
             )
 
-        target_positions = decoder_idx[0]
-        audio_span = next(span for span in sequence.spans if span.kind == "audio")
-        audio_positions = torch.arange(
-            audio_span.start, audio_span.end - 1, dtype=torch.long
+        # Scatter audio-frame outputs into sequence-aligned (L-1,) features.
+        audio_span = next(
+            span for span in sequence.spans if span.kind == SpanKind.AUDIO
         )
-        frame_targets = torch.as_tensor(sequence.tokens)[audio_positions, :-1]
-        logits = {0: semantic_logits[0, target_positions].cpu()}
-        logits.update(
-            {
-                codebook: residual_logits[0, :, codebook - 1].cpu()
-                for codebook in range(1, self.num_codebooks)
-            }
+        target_token_positions = torch.arange(
+            audio_span.start, audio_span.end, dtype=torch.long
         )
-        return ForwardFeatures(
-            logits=logits,
-            hiddens=hiddens[0, target_positions].cpu(),
-            audio_positions=audio_positions,
-            targets=frame_targets.cpu(),
+        feature_positions = target_token_positions - 1
+        if bool((feature_positions < 0).any()):
+            raise ValueError("Miso audio span cannot start at sequence position 0")
+
+        feature_len = sequence.length - 1
+        hidden_dim = int(hiddens.shape[-1])
+        aligned_hiddens = torch.zeros(feature_len, hidden_dim, dtype=torch.float32)
+        batch_target_positions = decoder_idx[0].cpu()
+        aligned_hiddens[feature_positions] = (
+            hiddens[0, batch_target_positions].cpu().float()
+        )
+
+        semantic = semantic_logits[0, batch_target_positions].cpu().float()
+        aligned_logits = {
+            0: torch.zeros(feature_len, semantic.shape[-1], dtype=torch.float32).index_copy(
+                0, feature_positions, semantic
+            )
+        }
+        for codebook in range(1, self.num_codebooks):
+            residual = residual_logits[0, :, codebook - 1].cpu().float()
+            aligned_logits[codebook] = torch.zeros(
+                feature_len, residual.shape[-1], dtype=torch.float32
+            ).index_copy(0, feature_positions, residual)
+
+        return FeaturizedSequence(
+            logits=aligned_logits,
+            hiddens=aligned_hiddens,
+            spans=list(sequence.spans),
+            layout=sequence.layout,
         )
 
 
@@ -244,15 +259,24 @@ class MisoTokenizer:
         self.text_tokenizer = _load_text_tokenizer(text_tokenizer)
         self.featurizer = featurizer or MisoFeaturizer()
 
-    def apply_chat_template(self, segments: Sequence[Segment]) -> TokenizedSequence:
+    def apply_chat_template(
+        self,
+        segments: Sequence[Segment],
+        *,
+        audio_codes: Mapping[int, Any] | None = None,
+    ) -> TokenizedSequence:
         torch = _torch()
+        audio_codes = audio_codes or {}
         blocks = []
         masks = []
-        spans: list[SequenceSpan] = []
+        spans: list[TokenSequenceSpan] = []
         position = 0
         channels = self.audio_codec.num_codebooks + 1
+        layout = TokenizedSequenceLayout(
+            num_codebooks=self.audio_codec.num_codebooks, text_channel=-1
+        )
 
-        for segment_index, segment in enumerate(segments):
+        for segment in segments:
             text_ids = list(
                 self.text_tokenizer.encode(
                     f"[{segment.speaker}] {segment.text.lstrip()}"
@@ -265,25 +289,24 @@ class MisoTokenizer:
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
-                SequenceSpan(
-                    segment_index,
-                    position,
-                    position + len(text_ids),
-                    "text",
-                    segment.metadata,
+                TokenSequenceSpan(
+                    source_dataset_id=segment.source_dataset_id,
+                    segment_id=segment.segment_id,
+                    start=position,
+                    end=position + len(text_ids),
+                    kind=SpanKind.TEXT,
                 )
             )
             position += len(text_ids)
 
-            if segment.audio_codes is not None:
-                codes = torch.as_tensor(segment.audio_codes, dtype=torch.long)
+            codes = audio_codes.get(segment.segment_id)
+            if codes is not None:
+                codes = torch.as_tensor(codes, dtype=torch.long)
                 if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
                     raise ValueError(
                         f"Expected (F, {self.audio_codec.num_codebooks}) Miso codes, "
                         f"got {tuple(codes.shape)}"
                     )
-                eos = torch.zeros(1, codes.shape[1], dtype=torch.long)
-                codes = torch.cat([codes, eos], dim=0)
                 audio = torch.zeros(codes.shape[0], channels, dtype=torch.long)
                 audio[:, :-1] = codes
                 audio_mask = torch.zeros_like(audio, dtype=torch.bool)
@@ -291,15 +314,31 @@ class MisoTokenizer:
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(
-                        segment_index,
-                        position,
-                        position + codes.shape[0],
-                        "audio",
-                        segment.metadata,
+                    TokenSequenceSpan(
+                        source_dataset_id=segment.source_dataset_id,
+                        segment_id=segment.segment_id,
+                        start=position,
+                        end=position + codes.shape[0],
+                        kind=SpanKind.AUDIO,
                     )
                 )
                 position += codes.shape[0]
+
+                eos = torch.zeros(1, channels, dtype=torch.long)
+                eos_mask = torch.zeros_like(eos, dtype=torch.bool)
+                eos_mask[:, :-1] = True
+                blocks.append(eos)
+                masks.append(eos_mask)
+                spans.append(
+                    TokenSequenceSpan(
+                        source_dataset_id=segment.source_dataset_id,
+                        segment_id=segment.segment_id,
+                        start=position,
+                        end=position + 1,
+                        kind=SpanKind.SPECIAL,
+                    )
+                )
+                position += 1
 
         if not blocks:
             raise ValueError("At least one segment is required")
@@ -307,8 +346,9 @@ class MisoTokenizer:
             tokens=torch.cat(blocks, dim=0),
             mask=torch.cat(masks, dim=0),
             spans=spans,
+            layout=layout,
         )
-        validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
+        result.validate()
         if result.length > self.max_seq_length:
             raise ValueError(
                 f"Sequence length {result.length} exceeds Miso limit {self.max_seq_length}"
@@ -319,23 +359,21 @@ class MisoTokenizer:
 def build_teacher_forcing_batch(sequence: TokenizedSequence):
     """Convert one prepared Miso segment to the reference model's shifted batch."""
     torch = _torch()
-    text_spans = [span for span in sequence.spans if span.kind == "text"]
-    audio_spans = [span for span in sequence.spans if span.kind == "audio"]
+    text_spans = sequence.spans_of(SpanKind.TEXT)
+    audio_spans = sequence.spans_of(SpanKind.AUDIO)
     if len(text_spans) != 1 or len(audio_spans) != 1:
         raise ValueError(
             "Teacher-forcing verification requires exactly one text/audio segment"
         )
     text_span, audio_span = text_spans[0], audio_spans[0]
-    if text_span.segment_index != audio_span.segment_index:
+    if text_span.segment_id != audio_span.segment_id:
         raise ValueError("Text and audio spans must belong to the same segment")
 
     prepared = torch.as_tensor(sequence.tokens, dtype=torch.long)
     prepared_mask = torch.as_tensor(sequence.mask, dtype=torch.bool)
     text_tokens = prepared[text_span.start : text_span.end]
     text_mask = prepared_mask[text_span.start : text_span.end]
-    # The prepared audio span has a final all-zero EOS frame; the reference
-    # teacher-forcing path predicts real codec frames and does not target EOS.
-    audio_codes = prepared[audio_span.start : audio_span.end - 1, :-1]
+    audio_codes = prepared[audio_span.start : audio_span.end, :-1]
     num_frames, num_codebooks = audio_codes.shape
     text_len = text_tokens.shape[0]
     seq_len = text_len + num_frames - 1

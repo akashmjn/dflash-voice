@@ -9,38 +9,29 @@ data/
     raw/ROW/
       audio.wav
       transcript_segments.json
+      MODEL_codebooks.pt         # temporary per-model codec dump
     MODEL_tokenized/ROW/
-      codebooks.pt
-      sequences.pt
-      masks.pt
-      metadata.json
+      sequences.pt              # list[{tokens, mask}]
+      metadata.json             # layout + spans per sequence
     MODEL_featurized/ROW/
-      logits.pt
-      hiddens.pt
+      features.pt               # list[{logits, hiddens}] length L-1
       metadata.json
-      kv_context.pt  # only with --dump-kv
+      kv_context.pt             # only with --dump-kv
     MODEL_entropy/ROW/          # from notebooks/entropy_compute.py
-      entropy.npz               # per-frame entropy + positions
-      entropy.json              # means, spans, offsets into the npz
+      entropy.npz
+      entropy.json
 ```
 
 `audio.wav` is channel-first when loaded by `dataprep.expresso`; transcript
-times are seconds and channels are zero-based. `codebooks.pt` stores a list of
-signed integer `(F, C)` tensors, one per source channel. `sequences.pt` stores
-variable-length `(L, C+1)` tensors and `masks.pt` stores matching boolean
-tensors. The final sequence channel is the text lane for Miso and Qwen. Fish uses
-its native layout transposed to seq-major form: channel 0 contains text or offset
-semantic IDs and channels 1–10 contain raw VQ IDs at audio positions.
+times are seconds and channels are zero-based. Per-model `MODEL_codebooks.pt`
+under `raw/` is a temporary codec dump (`(F, C)` per channel). `sequences.pt`
+stores ragged `{tokens, mask}` entries shaped `(L, C+1)`. Layout
+(`num_codebooks`, `text_channel`) and spans (`text` / `audio` / `special`) live
+in `metadata.json` so consumers do not need model-specific framing rules.
 
-`metadata.json` records sequence shapes and maps each text/audio span back to
-the dataset row, speaker, channel, timestamps, and codec-frame range. Miso
-adds an all-zero audio EOS frame; Qwen uses its configured codec EOS; Fish
-framing comes from `Conversation.encode_for_inference`.
-
-Featurization replays each saved `TokenizedSequence` with ground-truth audio
-tokens. `logits.pt` is a list of dictionaries keyed by codebook because the
-semantic and residual vocabularies can differ. Hidden states and logits contain
-only real audio target frames.
+Featurization replays each `TokenizedSequence` under teacher forcing.
+`features.pt` stores ragged `{logits, hiddens}` of length `L-1`, where index
+`i` predicts `tokens[i+1]`. Use audio spans to select supervised regions.
 
 ## Environments
 

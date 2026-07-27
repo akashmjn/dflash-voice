@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 from math import gcd
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from dataprep.common import (
-    ForwardFeatures,
+    FeaturizedSequence,
     Segment,
-    SequenceSpan,
+    TokenizedSequenceLayout,
+    TokenSequenceSpan,
+    SpanKind,
     TokenizedSequence,
-    validate_sequence,
+    _as_numpy,
 )
 
 
@@ -87,8 +89,8 @@ class Qwen3Featurizer:
         self,
         tokens,
         *,
-        text_span: SequenceSpan,
-        audio_span: SequenceSpan,
+        text_span: TokenSequenceSpan,
+        audio_span: TokenSequenceSpan,
     ):
         mx = _mx()
         model = self._model
@@ -123,9 +125,7 @@ class Qwen3Featurizer:
         pad_count = int(codec_embed.shape[1]) - 2
         combined = mx.concatenate(
             [
-                mx.broadcast_to(
-                    tts_pad, (1, pad_count, int(tts_pad.shape[-1]))
-                ),
+                mx.broadcast_to(tts_pad, (1, pad_count, int(tts_pad.shape[-1]))),
                 tts_bos,
             ],
             axis=1,
@@ -143,43 +143,35 @@ class Qwen3Featurizer:
 
     def featurize(
         self, sequence: TokenizedSequence, *, include_kv: bool = False
-    ) -> ForwardFeatures:
+    ) -> FeaturizedSequence:
         mx = _mx()
-        validate_sequence(sequence, self.num_codebooks, text_channel=-1)
+        sequence.validate()
         tokens = mx.array(sequence.tokens, dtype=mx.int32)
-        config = self._model.config.talker_config
 
-        spans_by_segment: dict[int, dict[str, SequenceSpan]] = {}
+        spans_by_segment: dict[int, dict[SpanKind, TokenSequenceSpan]] = {}
         for span in sequence.spans:
-            spans_by_segment.setdefault(span.segment_index, {})[span.kind] = span
+            spans_by_segment.setdefault(span.segment_id, {})[span.kind] = span
 
-        all_positions = []
-        all_targets = []
-        all_hiddens = []
-        all_logits: dict[int, list[Any]] = {
-            index: [] for index in range(self.num_codebooks)
-        }
+        feature_len = sequence.length - 1
         saved_caches = []
+        placed_hiddens = None
+        placed_logits: dict[int, Any] = {}
 
-        for segment_index in sorted(spans_by_segment):
-            spans = spans_by_segment[segment_index]
-            if "text" not in spans or "audio" not in spans:
+        for segment_id in sorted(spans_by_segment):
+            spans = spans_by_segment[segment_id]
+            if SpanKind.TEXT not in spans or SpanKind.AUDIO not in spans:
                 continue
-            text_span, audio_span = spans["text"], spans["audio"]
+            text_span, audio_span = spans[SpanKind.TEXT], spans[SpanKind.AUDIO]
             e_t, text_stream, text_pad = self._prepare_segment(
                 tokens, text_span=text_span, audio_span=audio_span
             )
-            target_values = np.asarray(sequence.tokens)[
-                audio_span.start : audio_span.end, :-1
-            ]
-            keep = target_values[:, 0] != config.codec_eos_token_id
-            positions = mx.array(
-                np.arange(audio_span.start, audio_span.end)[keep],
+            targets = mx.array(
+                np.asarray(sequence.tokens)[audio_span.start : audio_span.end, :-1],
                 dtype=mx.int32,
             )
-            targets = mx.array(target_values[keep], dtype=mx.int32)
             if int(targets.shape[0]) == 0:
                 continue
+            target_positions = np.arange(audio_span.start, audio_span.end)
 
             talker_cache = self._model.talker.make_cache()
             segment_hiddens = []
@@ -187,9 +179,7 @@ class Qwen3Featurizer:
                 index: [] for index in range(self.num_codebooks)
             }
             for frame_index in range(int(targets.shape[0])):
-                semantic_logits, hidden = self._model.talker(
-                    e_t, cache=talker_cache
-                )
+                semantic_logits, hidden = self._model.talker(e_t, cache=talker_cache)
                 semantic = targets[frame_index : frame_index + 1, 0:1]
                 residuals = targets[frame_index : frame_index + 1, 1:]
                 segment_logits[0].append(semantic_logits[:, -1])
@@ -204,20 +194,16 @@ class Qwen3Featurizer:
                     axis=1,
                 )
                 for codebook in range(1, self.num_codebooks):
-                    depth_logits, depth_cache, _ = (
-                        self._model.talker.code_predictor(
-                            depth_input,
-                            cache=depth_cache,
-                            generation_step=codebook - 1,
-                        )
+                    depth_logits, depth_cache, _ = self._model.talker.code_predictor(
+                        depth_input,
+                        cache=depth_cache,
+                        generation_step=codebook - 1,
                     )
                     segment_logits[codebook].append(depth_logits[:, -1])
                     if codebook < self.num_codebooks - 1:
-                        depth_input = (
-                            self._model.talker.code_predictor.codec_embedding[
-                                codebook - 1
-                            ](residuals[:, codebook - 1 : codebook])
-                        )
+                        depth_input = self._model.talker.code_predictor.codec_embedding[
+                            codebook - 1
+                        ](residuals[:, codebook - 1 : codebook])
 
                 if frame_index < int(text_stream.shape[1]):
                     text_embed = text_stream[:, frame_index : frame_index + 1]
@@ -226,34 +212,44 @@ class Qwen3Featurizer:
                 codec_embed = self._model.talker.get_input_embeddings()(semantic)
                 for codebook in range(1, self.num_codebooks):
                     codec_embed = codec_embed + (
-                        self._model.talker.code_predictor.codec_embedding[
-                            codebook - 1
-                        ](residuals[:, codebook - 1 : codebook])
+                        self._model.talker.code_predictor.codec_embedding[codebook - 1](
+                            residuals[:, codebook - 1 : codebook]
+                        )
                     )
                 e_t = text_embed + codec_embed
 
-            all_positions.append(positions)
-            all_targets.append(targets)
-            all_hiddens.append(mx.concatenate(segment_hiddens, axis=0))
-            for codebook in range(self.num_codebooks):
-                all_logits[codebook].append(
-                    mx.concatenate(segment_logits[codebook], axis=0)
+            hiddens_np = _as_numpy(mx.concatenate(segment_hiddens, axis=0)).astype(
+                np.float32
+            )
+            if placed_hiddens is None:
+                placed_hiddens = np.zeros(
+                    (feature_len, hiddens_np.shape[-1]), dtype=np.float32
                 )
+            feature_positions = target_positions - 1
+            if np.any(feature_positions < 0):
+                raise ValueError("Qwen3 audio span cannot start at sequence position 0")
+            placed_hiddens[feature_positions] = hiddens_np
+            for codebook in range(self.num_codebooks):
+                values = _as_numpy(
+                    mx.concatenate(segment_logits[codebook], axis=0)
+                ).astype(np.float32)
+                if codebook not in placed_logits:
+                    placed_logits[codebook] = np.zeros(
+                        (feature_len, values.shape[-1]), dtype=np.float32
+                    )
+                placed_logits[codebook][feature_positions] = values
             if include_kv:
                 saved_caches.append(
                     [(layer.keys, layer.values) for layer in talker_cache]
                 )
 
-        if not all_targets:
-            raise ValueError("Qwen3 sequence contains no non-EOS audio frames")
-        positions = mx.concatenate(all_positions, axis=0)
-        targets = mx.concatenate(all_targets, axis=0)
-        hiddens = mx.concatenate(all_hiddens, axis=0)
+        if placed_hiddens is None:
+            raise ValueError("Qwen3 sequence contains no audio frames")
+        hiddens = mx.array(placed_hiddens)
         logits = {
-            codebook: mx.concatenate(chunks, axis=0)
-            for codebook, chunks in all_logits.items()
+            codebook: mx.array(values) for codebook, values in placed_logits.items()
         }
-        mx.eval(positions, targets, hiddens, *logits.values())
+        mx.eval(hiddens, *logits.values())
         if include_kv:
             mx.eval(
                 *[
@@ -264,11 +260,11 @@ class Qwen3Featurizer:
                     if value is not None
                 ]
             )
-        return ForwardFeatures(
+        return FeaturizedSequence(
             logits=logits,
             hiddens=hiddens,
-            audio_positions=positions,
-            targets=targets,
+            spans=list(sequence.spans),
+            layout=sequence.layout,
             kv_cache=saved_caches if include_kv else None,
         )
 
@@ -320,16 +316,25 @@ class Qwen3Tokenizer:
             prefix.append(speaker_id)
         return [*prefix, config.codec_pad_id, config.codec_bos_id]
 
-    def apply_chat_template(self, segments: Sequence[Segment]) -> TokenizedSequence:
+    def apply_chat_template(
+        self,
+        segments: Sequence[Segment],
+        *,
+        audio_codes: Mapping[int, Any] | None = None,
+    ) -> TokenizedSequence:
         mx = _mx()
+        audio_codes = audio_codes or {}
         blocks = []
         masks = []
-        spans: list[SequenceSpan] = []
+        spans: list[TokenSequenceSpan] = []
         position = 0
         channels = self.audio_codec.num_codebooks + 1
         config = self._model.config.talker_config
+        layout = TokenizedSequenceLayout(
+            num_codebooks=self.audio_codec.num_codebooks, text_channel=-1
+        )
 
-        for segment_index, segment in enumerate(segments):
+        for segment in segments:
             chat = f"<|im_start|>assistant\n{segment.text}<|im_end|>\n<|im_start|>assistant\n"
             text_ids = list(self.text_tokenizer.encode(chat))
             text = mx.zeros((len(text_ids), channels), dtype=mx.int32)
@@ -339,17 +344,18 @@ class Qwen3Tokenizer:
             blocks.append(text)
             masks.append(text_mask)
             spans.append(
-                SequenceSpan(
-                    segment_index,
-                    position,
-                    position + len(text_ids),
-                    "text",
-                    segment.metadata,
+                TokenSequenceSpan(
+                    source_dataset_id=segment.source_dataset_id,
+                    segment_id=segment.segment_id,
+                    start=position,
+                    end=position + len(text_ids),
+                    kind=SpanKind.TEXT,
                 )
             )
             position += len(text_ids)
 
-            if segment.audio_codes is not None:
+            codes = audio_codes.get(segment.segment_id)
+            if codes is not None:
                 prefix_ids = self._codec_prefix()
                 prefix = mx.zeros((len(prefix_ids), channels), dtype=mx.int32)
                 prefix[:, 0] = mx.array(prefix_ids, dtype=mx.int32)
@@ -357,16 +363,22 @@ class Qwen3Tokenizer:
                 prefix_mask[:, 0] = True
                 blocks.append(prefix)
                 masks.append(prefix_mask)
+                spans.append(
+                    TokenSequenceSpan(
+                        source_dataset_id=segment.source_dataset_id,
+                        segment_id=segment.segment_id,
+                        start=position,
+                        end=position + len(prefix_ids),
+                        kind=SpanKind.SPECIAL,
+                    )
+                )
                 position += len(prefix_ids)
 
-                codes = mx.array(segment.audio_codes, dtype=mx.int32)
+                codes = mx.array(codes, dtype=mx.int32)
                 if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
                     raise ValueError(
                         f"Expected (F, {self.audio_codec.num_codebooks}) Qwen3 codes, got {codes.shape}"
                     )
-                eos = mx.zeros((1, self.audio_codec.num_codebooks), dtype=mx.int32)
-                eos[0, 0] = config.codec_eos_token_id
-                codes = mx.concatenate([codes, eos], axis=0)
                 audio = mx.zeros((codes.shape[0], channels), dtype=mx.int32)
                 audio[:, :-1] = codes
                 audio_mask = mx.zeros(audio.shape, dtype=mx.bool_)
@@ -374,15 +386,32 @@ class Qwen3Tokenizer:
                 blocks.append(audio)
                 masks.append(audio_mask)
                 spans.append(
-                    SequenceSpan(
-                        segment_index,
-                        position,
-                        position + codes.shape[0],
-                        "audio",
-                        segment.metadata,
+                    TokenSequenceSpan(
+                        source_dataset_id=segment.source_dataset_id,
+                        segment_id=segment.segment_id,
+                        start=position,
+                        end=position + codes.shape[0],
+                        kind=SpanKind.AUDIO,
                     )
                 )
-                position += codes.shape[0]
+                position += int(codes.shape[0])
+
+                eos = mx.zeros((1, channels), dtype=mx.int32)
+                eos[0, 0] = config.codec_eos_token_id
+                eos_mask = mx.zeros(eos.shape, dtype=mx.bool_)
+                eos_mask[:, :-1] = True
+                blocks.append(eos)
+                masks.append(eos_mask)
+                spans.append(
+                    TokenSequenceSpan(
+                        source_dataset_id=segment.source_dataset_id,
+                        segment_id=segment.segment_id,
+                        start=position,
+                        end=position + 1,
+                        kind=SpanKind.SPECIAL,
+                    )
+                )
+                position += 1
 
         if not blocks:
             raise ValueError("At least one segment is required")
@@ -390,8 +419,9 @@ class Qwen3Tokenizer:
             tokens=mx.concatenate(blocks, axis=0),
             mask=mx.concatenate(masks, axis=0),
             spans=spans,
+            layout=layout,
         )
-        validate_sequence(result, self.audio_codec.num_codebooks, text_channel=-1)
+        result.validate()
         if result.length > self.max_seq_length:
             raise ValueError(
                 f"Sequence length {result.length} exceeds Qwen3 limit {self.max_seq_length}"
