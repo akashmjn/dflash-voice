@@ -333,6 +333,10 @@ class FeaturizedSequence:
                     f"Span {span} incompatible with feature length {feature_len}"
                 )
 
+    def spans_of(self, kind: SpanKind | str) -> list[TokenSequenceSpan]:
+        kind = SpanKind(kind)
+        return [span for span in self.spans if span.kind == kind]
+
     @staticmethod
     def save_all(
         directory: str | Path,
