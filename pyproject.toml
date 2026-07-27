@@ -51,6 +51,7 @@ dataprep-mlx = [
 ]
 
 [tool.pytest.ini_options]
+addopts = "-m 'not expensive'"
 markers = [
-    "integration: downloads models and runs end-to-end inference",
+    "expensive: loads full models for dataprep featurization or entropy checks",
 ]
