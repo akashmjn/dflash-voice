@@ -3,8 +3,11 @@ from __future__ import annotations
 import os
 from typing import Any, Mapping, Sequence
 
-# Moshi decode on Apple MPS needs this before Torch initializes MPS kernels.
+# Moshi decode on Apple MPS needs this before Torch initializes MPS kernels, so
+# it must stay above the torch import below (directly, and via dataprep.common).
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+import torch
 
 from dataprep.common import (
     FeaturizedSequence,
@@ -14,12 +17,6 @@ from dataprep.common import (
     SpanKind,
     TokenizedSequence,
 )
-
-
-def _torch():
-    import torch
-
-    return torch
 
 
 def _load_text_tokenizer(tokenizer: Any | None = None):
@@ -42,7 +39,6 @@ class MisoAudioCodec:
         device: str | None = None,
         chunk_duration_sec: float = 30.0,
     ):
-        torch = _torch()
         self.device = device or (
             "cuda"
             if torch.cuda.is_available()
@@ -75,7 +71,6 @@ class MisoAudioCodec:
         self.frame_rate = float(codec.frame_rate)
 
     def encode(self, audio: Any, sample_rate: int):
-        torch = _torch()
         waveform = torch.as_tensor(audio, dtype=torch.float32)
         if waveform.ndim == 2:
             waveform = waveform.mean(dim=0)
@@ -105,7 +100,6 @@ class MisoAudioCodec:
         return torch.cat(chunks, dim=-1).transpose(0, 1).contiguous()
 
     def decode(self, codes: Any):
-        torch = _torch()
         codes = torch.as_tensor(codes, dtype=torch.long)
         if codes.ndim != 2 or codes.shape[1] != self.num_codebooks:
             raise ValueError(
@@ -148,7 +142,6 @@ class MisoFeaturizer:
             raise NotImplementedError(
                 "Miso teacher-forced KV export is not available with disabled caches"
             )
-        torch = _torch()
         from torchtune.modules.common_utils import disable_kv_cache
 
         batch = build_teacher_forcing_batch(sequence)
@@ -265,7 +258,6 @@ class MisoTokenizer:
         *,
         audio_codes: Mapping[int, Any] | None = None,
     ) -> TokenizedSequence:
-        torch = _torch()
         audio_codes = audio_codes or {}
         blocks = []
         masks = []
@@ -358,7 +350,6 @@ class MisoTokenizer:
 
 def build_teacher_forcing_batch(sequence: TokenizedSequence):
     """Convert one prepared Miso segment to the reference model's shifted batch."""
-    torch = _torch()
     text_spans = sequence.spans_of(SpanKind.TEXT)
     audio_spans = sequence.spans_of(SpanKind.AUDIO)
     if len(text_spans) != 1 or len(audio_spans) != 1:

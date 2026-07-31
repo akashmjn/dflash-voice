@@ -38,13 +38,19 @@ All are defined in `common.py` — see it for exact fields and on-disk format.
 | --- | --- |
 | `Segment` | One speaker turn — transcript metadata only. |
 | `SpanKind`, `TokenSequenceSpan` | Region kind (`text` / `audio` / `special`) and its `[start, end)` range on a sequence. |
-| `TokenizedSequenceLayout` | Channel geometry: `num_codebooks` and the text channel. |
+| `TokenizedSequenceLayout` | Constant-per-model geometry: channel map (`num_codebooks`, text channel), which token column each head is scored against, and the featurized hidden/logit widths. |
 | `TokenizedSequence` | Model-ready `(L, C+1)` tokens/mask, plus its layout and spans. |
 | `FeaturizedSequence` | Teacher-forced `{logits, hiddens}` of length `L-1`; index `i` predicts `tokens[i+1]`. |
 
 Consumers branch on spans rather than model-specific framing rules. For an audio
 span `[s, e)`, the predictions live at features `[s-1, e-1)` — use
 `FeaturizedSequence.feature_slice_for_targets`.
+
+`common.py` also scores a featurized sequence against its ground-truth codes:
+`audio_frame_metrics` returns per-frame entropy and NLL for each codebook (using
+`layout.head_targets` to pick each head's target column), and `nll_summary`
+reduces that NLL to the `semantic` / `audio` / `total` groups in nats per frame
+and kbit/s. `notebooks/frame_metrics.py` drives these across rows.
 
 ## On-disk layout
 
@@ -56,13 +62,13 @@ data/DATASET/                   # e.g. data/expresso/
     MODEL_codebooks.pt        # temporary per-model codec dump, (F, C) per channel
   MODEL_tokenized/ROW/
     sequences.pt              # ragged list[{tokens, mask}] shaped (L, C+1)
-    metadata.json             # layout + spans per sequence
+    metadata.json             # one layout for the row + per-sequence length/spans
   MODEL_featurized/ROW/
     features.pt               # ragged list[{logits, hiddens}] of length L-1
-    metadata.json
+    metadata.json             # same shape; layout also carries hidden/logit dims
     kv_context.pt             # only with --dump-kv
-  entropy/ROW/                # written by notebooks/entropy_utils.py
-    MODEL_entropy.{npz,json}
+  metrics/ROW/                # written by notebooks/frame_metrics.py
+    MODEL_metrics.{npz,json}
 ```
 
 ## Environments

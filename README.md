@@ -25,7 +25,7 @@ python benchmark_mlx/bench_tts_mlx.py --backend fish
 
 This will help reproduce benchmark results shown above on a local Apple Silicon laptop with MLX support.
 
-To reproduce the entropy analysis ([discussed below](#why)), see [dataprep](dataprep/README.md) for the data-prep pipeline and [notebooks](notebooks/README.md) for computing and exploring the entropy.
+To reproduce the entropy analysis ([discussed below](#why)), see [dataprep](dataprep/README.md) for the data-prep pipeline and [notebooks](notebooks/README.md) for computing and exploring the per-frame metrics.
 
 ## Benchmark results (per-codec-frame breakdown)
 

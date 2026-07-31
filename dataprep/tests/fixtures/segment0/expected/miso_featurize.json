@@ -1,13 +1,56 @@
 {
-  "feature_length": 363,
+  "sequence_length": 363,
   "pred_slice_len": 297,
-  "hiddens_shape": [
-    363,
-    4096
-  ],
-  "logits0_shape": [
-    363,
-    2051
-  ],
-  "num_logits": 32
+  "hidden_dim": 4096,
+  "logit_dim0": 2051,
+  "num_logits": 32,
+  "nll_frames": 297,
+  "nll_summary": {
+    "semantic": {
+      "nats_per_frame": 1.7278,
+      "kbits_per_second": 0.0312
+    },
+    "audio": {
+      "nats_per_frame": 288.3171,
+      "kbits_per_second": 5.1994
+    },
+    "total": {
+      "nats_per_frame": 290.0448,
+      "kbits_per_second": 5.2306
+    }
+  },
+  "codebook_nll_nats": [
+    1.7278,
+    18.4754,
+    10.5506,
+    10.1296,
+    8.6395,
+    8.6734,
+    7.5382,
+    7.6731,
+    7.5112,
+    7.428,
+    7.9817,
+    8.3035,
+    8.0546,
+    8.6311,
+    8.5792,
+    8.8121,
+    8.9206,
+    8.7223,
+    9.1586,
+    9.0042,
+    9.3523,
+    9.3086,
+    9.5076,
+    9.4169,
+    9.6963,
+    9.7013,
+    9.7238,
+    9.756,
+    9.9754,
+    9.9234,
+    12.4127,
+    6.756
+  ]
 }

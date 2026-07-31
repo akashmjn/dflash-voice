@@ -13,12 +13,16 @@ Pipeline objects are intentionally small and self-describing:
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import asdict, dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Sequence
 
 import numpy as np
+import torch
+
+NATS_TO_BITS = 1.0 / math.log(2.0)
 
 
 class SpanKind(str, Enum):
@@ -62,8 +66,6 @@ class Segment:
         )
 
     def frame_bounds(self, *, frame_rate: float, max_frames: int) -> tuple[int, int]:
-        import math
-
         start = max(0, int(math.floor(self.start_sec * frame_rate)))
         end = min(max_frames, int(math.ceil(self.end_sec * frame_rate)))
         if end <= start:
@@ -103,19 +105,74 @@ class TokenSequenceSpan:
 
 @dataclass(frozen=True)
 class TokenizedSequenceLayout:
-    """Enough channel geometry for a consumer to interpret tokens/mask."""
+    """Channel geometry that makes a serialized ``(L, C+1)`` sequence self-describing.
+
+    A frame has ``num_codebooks + 1`` channels. Exactly one is the ``text_channel``
+    (text tokens, and for a semantic-LM model like Fish the semantic token too);
+    the rest are ``audio_channels`` — the codec codes, in codebook order, that the
+    waveform decoder consumes.
+
+    ``head_targets`` maps which saved token column targets are teacher-forced
+    against. Usually code head ``k`` predicts ``audio_channels[k]``. The exception is 
+    Fish, which predicts the semantic codes in ``text_channel`` rather than the 
+    audio code. Consumers can score/read logits without re-deriving this per model.
+
+    ``hidden_dim`` and ``logit_dims`` describe the featurized side: the model's
+    hidden width and each head's vocabulary size. They are constant for a model,
+    so they live here rather than being repeated per sequence, and are unset
+    (``None`` / empty) on a purely tokenized sequence.
+    """
 
     num_codebooks: int
     text_channel: int
+    head_targets: tuple[int, ...] = ()
+    hidden_dim: int | None = None
+    logit_dims: tuple[int, ...] = ()
+
+    def __post_init__(self) -> None:
+        # Default: each head predicts its own audio channel (no semantic LM head).
+        if not self.head_targets:
+            object.__setattr__(self, "head_targets", tuple(self.audio_channels))
+        if len(self.head_targets) != self.num_codebooks:
+            raise ValueError(
+                f"head_targets must have {self.num_codebooks} entries, "
+                f"got {len(self.head_targets)}"
+            )
+
+    @property
+    def num_channels(self) -> int:
+        return self.num_codebooks + 1
+
+    @property
+    def text_column(self) -> int:
+        return self.text_channel % self.num_channels
+
+    @property
+    def audio_channels(self) -> tuple[int, ...]:
+        """Columns holding codec audio codes, in codebook order."""
+        return tuple(c for c in range(self.num_channels) if c != self.text_column)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = {
+            "num_codebooks": self.num_codebooks,
+            "text_channel": self.text_channel,
+            "head_targets": list(self.head_targets),
+        }
+        if self.hidden_dim is not None:
+            payload["hidden_dim"] = self.hidden_dim
+        if self.logit_dims:
+            payload["logit_dims"] = list(self.logit_dims)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> TokenizedSequenceLayout:
+        hidden_dim = payload.get("hidden_dim")
         return cls(
             num_codebooks=int(payload["num_codebooks"]),
             text_channel=int(payload["text_channel"]),
+            head_targets=tuple(payload.get("head_targets", ())),
+            hidden_dim=None if hidden_dim is None else int(hidden_dim),
+            logit_dims=tuple(payload.get("logit_dims", ())),
         )
 
 
@@ -135,8 +192,6 @@ def _as_numpy(value: Any) -> np.ndarray:
 
 
 def _as_torch(value: Any):
-    import torch
-
     if isinstance(value, torch.Tensor):
         return value.detach().cpu()
     if (
@@ -189,10 +244,8 @@ class TokenizedSequence:
                 f"{self.layout.num_codebooks} codebooks, got {tokens.shape[1]}"
             )
 
-        text_channel = self.layout.text_channel % expected_channels
-        audio_channels = [
-            idx for idx in range(expected_channels) if idx != text_channel
-        ]
+        text_channel = self.layout.text_column
+        audio_channels = list(self.layout.audio_channels)
         audio_active = mask[:, audio_channels].any(axis=1)
         if np.any(tokens[~audio_active][:, audio_channels] != 0):
             raise ValueError(
@@ -218,8 +271,15 @@ class TokenizedSequence:
         *,
         metadata: dict[str, Any],
     ) -> Path:
-        """Write ``sequences.pt`` (tokens+masks) and ``metadata.json`` (spans/layout)."""
-        import torch
+        """Write ``sequences.pt`` (tokens+masks) and ``metadata.json`` (spans/layout).
+
+        ``layout`` is written once at the top level; it is constant for a model.
+        """
+        if not sequences:
+            raise ValueError("Cannot save an empty sequence list")
+        layout = sequences[0].layout
+        if any(item.layout != layout for item in sequences):
+            raise ValueError("All sequences in a row must share one layout")
 
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -238,11 +298,11 @@ class TokenizedSequence:
             (directory / stale).unlink(missing_ok=True)
         payload = {
             **metadata,
+            "layout": layout.to_dict(),
             "sequences": [
                 {
                     "sequence_id": index,
-                    "shape": list(_as_numpy(item.tokens).shape),
-                    "layout": item.layout.to_dict(),
+                    "sequence_length": item.length,
                     "spans": [span.to_dict() for span in item.spans],
                 }
                 for index, item in enumerate(sequences)
@@ -257,8 +317,6 @@ class TokenizedSequence:
     def load_all(
         directory: str | Path,
     ) -> tuple[list[TokenizedSequence], dict[str, Any]]:
-        import torch
-
         directory = Path(directory)
         metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
         rows = torch.load(
@@ -267,9 +325,9 @@ class TokenizedSequence:
         if len(rows) != len(metadata["sequences"]):
             raise ValueError(f"Inconsistent tokenized artifacts in {directory}")
 
+        layout = TokenizedSequenceLayout.from_dict(metadata["layout"])
         sequences = []
         for row, sequence_meta in zip(rows, metadata["sequences"]):
-            layout = TokenizedSequenceLayout.from_dict(sequence_meta["layout"])
             spans = [
                 TokenSequenceSpan.from_dict(payload)
                 for payload in sequence_meta["spans"]
@@ -305,6 +363,17 @@ class FeaturizedSequence:
     def length(self) -> int:
         """Feature length ``L - 1``."""
         return int(self.hiddens.shape[0])
+
+    def feature_layout(self) -> TokenizedSequenceLayout:
+        """Source layout with the model's hidden/logit widths filled in."""
+        return replace(
+            self.layout,
+            hidden_dim=int(self.hiddens.shape[-1]),
+            logit_dims=tuple(
+                int(self.logits[index].shape[-1])
+                for index in range(self.layout.num_codebooks)
+            ),
+        )
 
     def feature_slice_for_targets(self, start: int, end: int) -> slice:
         """Slice of features that predict ``tokens[start:end]``."""
@@ -344,7 +413,16 @@ class FeaturizedSequence:
         *,
         metadata: dict[str, Any],
     ) -> Path:
-        import torch
+        """Write ``features.pt`` and ``metadata.json`` (top-level layout, per-sequence spans).
+
+        The saved layout carries the model's ``hidden_dim`` / ``logit_dims``, read
+        off the first sequence since both are constant across a row.
+        """
+        if not sequences:
+            raise ValueError("Cannot save an empty sequence list")
+        layout = sequences[0].feature_layout()
+        if any(item.feature_layout() != layout for item in sequences):
+            raise ValueError("All sequences in a row must share one layout")
 
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -374,17 +452,12 @@ class FeaturizedSequence:
 
         payload = {
             **metadata,
+            "layout": layout.to_dict(),
             "sequences": [
                 {
                     "sequence_id": index,
-                    "feature_length": item.length,
-                    "layout": item.layout.to_dict(),
+                    "sequence_length": item.length,
                     "spans": [span.to_dict() for span in item.spans],
-                    "hidden_shape": list(_as_numpy(item.hiddens).shape),
-                    "logit_shapes": {
-                        str(codebook): list(_as_numpy(logits).shape)
-                        for codebook, logits in item.logits.items()
-                    },
                 }
                 for index, item in enumerate(sequences)
             ],
@@ -398,8 +471,6 @@ class FeaturizedSequence:
     def load_all(
         directory: str | Path,
     ) -> tuple[list[FeaturizedSequence], dict[str, Any]]:
-        import torch
-
         directory = Path(directory)
         metadata = json.loads((directory / "metadata.json").read_text(encoding="utf-8"))
         rows = torch.load(
@@ -414,6 +485,7 @@ class FeaturizedSequence:
         if len(rows) != len(metadata["sequences"]):
             raise ValueError(f"Inconsistent featurized artifacts in {directory}")
 
+        layout = TokenizedSequenceLayout.from_dict(metadata["layout"])
         sequences = []
         for row, kv_cache, sequence_meta in zip(rows, kv_rows, metadata["sequences"]):
             item = FeaturizedSequence(
@@ -423,9 +495,72 @@ class FeaturizedSequence:
                     TokenSequenceSpan.from_dict(payload)
                     for payload in sequence_meta["spans"]
                 ],
-                layout=TokenizedSequenceLayout.from_dict(sequence_meta["layout"]),
+                layout=layout,
                 kv_cache=kv_cache,
             )
             item.validate()
             sequences.append(item)
         return sequences, metadata
+
+
+def audio_frame_metrics(
+    features: FeaturizedSequence, tokens: Any, num_codebooks: int
+) -> dict[str, Any]:
+    """Per-frame predictive entropy and ground-truth NLL (both nats) per codebook.
+
+    Returns ``(F, num_codebooks)`` torch tensors for ``entropy`` / ``nll`` plus the
+    audio-frame ``positions`` (F,), concatenated over the audio spans of
+    ``features``. ``tokens`` is the source ``(L, C+1)`` array. The ground-truth
+    column for each head comes from ``layout.head_targets``, so a semantic LM head
+    (Fish head 0) is scored against the semantic token rather than the audio code.
+    """
+    tokens = _as_numpy(tokens)
+    columns = features.layout.head_targets
+    entropy_parts: list[Any] = []
+    nll_parts: list[Any] = []
+    position_parts: list[Any] = []
+    for span in features.spans_of(SpanKind.AUDIO):
+        pred = features.feature_slice_for_targets(span.start, span.end)
+        targets = torch.as_tensor(tokens[span.start : span.end], dtype=torch.long)
+        entropy_cb, nll_cb = [], []
+        for index in range(num_codebooks):
+            # _as_numpy, not np.asarray: in-memory MLX logits may be bfloat16.
+            logits = torch.as_tensor(_as_numpy(features.logits[index][pred])).float()
+            log_probs = torch.log_softmax(logits, dim=-1)
+            target = targets[:, columns[index]]
+            entropy_cb.append(-(log_probs.exp() * log_probs).sum(dim=-1))
+            nll_cb.append(-log_probs.gather(1, target[:, None]).squeeze(1))
+        entropy_parts.append(torch.stack(entropy_cb, dim=1))
+        nll_parts.append(torch.stack(nll_cb, dim=1))
+        position_parts.append(torch.arange(span.start, span.end, dtype=torch.int32))
+    if not entropy_parts:
+        raise ValueError("Sequence has no audio spans")
+    return {
+        "entropy": torch.cat(entropy_parts, dim=0),
+        "nll": torch.cat(nll_parts, dim=0),
+        "positions": torch.cat(position_parts, dim=0),
+    }
+
+
+def nll_summary(nll: Any, frame_rate: float) -> dict[str, dict[str, float]]:
+    """Teacher-forced CE for the ``semantic`` / ``audio`` / ``total`` code groups.
+
+    ``nll`` is ``(frames, num_codebooks)`` in nats. Each group reports
+    ``nats_per_frame`` — summed over the group's codebooks, so it is the CE of
+    emitting that whole part of a frame — and the same figure as a bitrate,
+    ``kbits_per_second = nats * log2(e) * frame_rate / 1000``.
+    """
+    nll = _as_numpy(nll)
+    groups = {
+        "semantic": nll[:, :1],
+        "audio": nll[:, 1:],
+        "total": nll,
+    }
+    summary = {}
+    for name, values in groups.items():
+        nats = float(values.sum(axis=1).mean())
+        summary[name] = {
+            "nats_per_frame": nats,
+            "kbits_per_second": nats * NATS_TO_BITS * frame_rate / 1000.0,
+        }
+    return summary

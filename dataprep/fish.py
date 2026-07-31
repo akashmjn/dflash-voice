@@ -271,8 +271,13 @@ class FishTokenizer:
         spans: list[TokenSequenceSpan] = []
         position = 0
         tokenizer = self._model.tokenizer
+        # Head 0 is a semantic LM head predicting the channel-0 token; heads 1..N-1
+        # predict audio channels 2..N (channel 1 holds the redundant semantic code).
+        num_codebooks = self.audio_codec.num_codebooks
         layout = TokenizedSequenceLayout(
-            num_codebooks=self.audio_codec.num_codebooks, text_channel=0
+            num_codebooks=num_codebooks,
+            text_channel=0,
+            head_targets=(0, *range(2, num_codebooks + 1)),
         )
 
         for segment in segments:

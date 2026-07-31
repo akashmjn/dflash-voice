@@ -1,13 +1,34 @@
 {
-  "feature_length": 581,
+  "sequence_length": 581,
   "pred_slice_len": 499,
-  "hiddens_shape": [
-    581,
-    2560
-  ],
-  "logits0_shape": [
-    581,
-    155776
-  ],
-  "num_logits": 10
+  "hidden_dim": 2560,
+  "logit_dim0": 155776,
+  "num_logits": 10,
+  "nll_frames": 499,
+  "nll_summary": {
+    "semantic": {
+      "nats_per_frame": 4.2026,
+      "kbits_per_second": 0.1273
+    },
+    "audio": {
+      "nats_per_frame": 45.7567,
+      "kbits_per_second": 1.3863
+    },
+    "total": {
+      "nats_per_frame": 49.9593,
+      "kbits_per_second": 1.5136
+    }
+  },
+  "codebook_nll_nats": [
+    4.2026,
+    3.912,
+    4.997,
+    4.9988,
+    5.3293,
+    5.0775,
+    5.2801,
+    5.4529,
+    5.4681,
+    5.2411
+  ]
 }

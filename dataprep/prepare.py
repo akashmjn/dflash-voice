@@ -4,10 +4,15 @@ import argparse
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-import numpy as np
+import torch
 from tqdm import tqdm
 
-from dataprep.common import FeaturizedSequence, Segment, TokenizedSequence
+from dataprep.common import (
+    FeaturizedSequence,
+    Segment,
+    TokenizedSequence,
+    _as_torch,
+)
 from dataprep.expresso import download_expresso, load_raw_example
 
 
@@ -15,21 +20,6 @@ DEFAULT_MODELS = {
     "qwen3": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
     "fish": "mlx-community/fish-audio-s2-pro-8bit",
 }
-
-
-def _as_torch(value: Any):
-    import torch
-
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu()
-    if (
-        type(value).__module__.startswith("mlx.")
-        and str(value.dtype) == "mlx.core.bfloat16"
-    ):
-        import mlx.core as mx
-
-        value = value.astype(mx.float32)
-    return torch.from_numpy(np.asarray(value)).cpu()
 
 
 def load_tokenizer(model: str, model_id: str | None = None, device: str | None = None):
@@ -59,8 +49,6 @@ def save_codebooks(
     frame_rate: float,
     num_codebooks: int,
 ) -> None:
-    import torch
-
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
         {
@@ -188,13 +176,7 @@ def prepare_row(
             "model": model,
             "dataset": "Zackh/expresso-contextual",
             "row": example.row,
-            "sample_rate": tokenizer.audio_codec.sample_rate,
             "frame_rate": tokenizer.audio_codec.frame_rate,
-            "num_codebooks": tokenizer.audio_codec.num_codebooks,
-            "num_channels": example.num_channels,
-            "num_segments": len(segments),
-            "pack_segments": pack_segments,
-            "codebooks": str(codebooks),
         },
     )
     tqdm.write(f"Tokenizing row {row}: wrote {len(sequences)} sequence(s) to {output_dir}")
@@ -233,9 +215,6 @@ def featurize_row(
             "dataset": source_metadata["dataset"],
             "row": row,
             "frame_rate": source_metadata["frame_rate"],
-            "num_codebooks": featurizer.num_codebooks,
-            "semantic_logits_masked": model == "fish",
-            "kv_saved": dump_kv,
         },
     )
     tqdm.write(f"Featurizing row {row}: wrote {feature_dir}")

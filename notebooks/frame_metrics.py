@@ -1,11 +1,18 @@
-"""Entropy computation and summarization for featurized Expresso rows.
+"""Per-frame metrics for featurized Expresso rows.
 
-Reads `DATA_ROOT/MODEL_featurized/ROW/{features.pt,metadata.json}` and writes
-`DATA_ROOT/entropy/ROW/MODEL_entropy.{npz,json}` for `entropy_explore.py`.
+Reads `DATA_ROOT/{MODEL_featurized,MODEL_tokenized}/ROW/` and writes
+`DATA_ROOT/metrics/ROW/MODEL_metrics.{npz,json}` for `metrics_explore.py`.
+
+Per audio frame and codebook we record predictive entropy and the teacher-forced
+ground-truth NLL (the CE loss), then summarize NLL for the semantic / audio /
+total code groups in two units: nats per frame, and the equivalent bitrate in
+kbit/s. Scoring itself lives in `dataprep.common` (`audio_frame_metrics` and
+`nll_summary`) so the dataprep tests can assert against it; this module is the
+batch driver plus the record shaping that `metrics_explore.py` charts.
 
 ```bash
-python notebooks/entropy_utils.py
-python notebooks/entropy_utils.py --model fish
+python notebooks/frame_metrics.py
+python notebooks/frame_metrics.py --model fish
 ```
 
 `DEFAULT_DATA_ROOT` is the repo-relative Expresso artifact root (`data/expresso`).
@@ -15,17 +22,23 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 
-from dataprep.common import FeaturizedSequence, SpanKind
+from dataprep.common import (
+    NATS_TO_BITS,
+    FeaturizedSequence,
+    SpanKind,
+    TokenizedSequence,
+    _as_numpy,
+    audio_frame_metrics,
+    nll_summary,
+)
 
 DEFAULT_DATA_ROOT = Path("data/expresso")
-NATS_TO_BITS = 1.0 / math.log(2.0)
 
 
 def group_entropy_bits(entropy_bits: np.ndarray, mid: int) -> dict[str, np.ndarray]:
@@ -68,47 +81,59 @@ def group_frame_records(
     ]
 
 
-def predictive_entropy(logits: Any) -> torch.Tensor:
-    logits = torch.as_tensor(np.asarray(logits)).float()
-    log_probs = torch.log_softmax(logits, dim=-1)
-    return -(log_probs.exp() * log_probs).sum(dim=-1)
+def nll_breakdown_records(
+    nll: np.ndarray, frame_rate: float
+) -> list[dict[str, Any]]:
+    """Table rows: NLL per group and per codebook, in nats/frame and kbit/s.
 
-
-def audio_entropy_frames(
-    features: FeaturizedSequence, num_codebooks: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    per_frame_parts: list[torch.Tensor] = []
-    position_parts: list[torch.Tensor] = []
-    for span in features.spans_of(SpanKind.AUDIO):
-        pred = features.feature_slice_for_targets(span.start, span.end)
-        entropy = torch.stack(
-            [
-                predictive_entropy(features.logits[index][pred])
-                for index in range(num_codebooks)
-            ],
-            dim=1,
-        )
-        per_frame_parts.append(entropy)
-        position_parts.append(torch.arange(span.start, span.end, dtype=torch.int32))
-    if not per_frame_parts:
-        raise ValueError("Sequence has no audio spans")
-    return torch.cat(per_frame_parts, dim=0), torch.cat(position_parts, dim=0)
-
-
-def load_entropy(entropy_dir: Path, model: str) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    entropy_dir = Path(entropy_dir)
-    payload = json.loads(
-        (entropy_dir / f"{model}_entropy.json").read_text(encoding="utf-8")
+    ``nll`` is a ``(frames, num_codebooks)`` slice in nats — pass the whole row or
+    one sequence's frames. Emits the ``semantic`` / ``audio`` / ``total`` groups
+    from :func:`nll_summary` followed by one row per audio codebook, each with the
+    share of total NLL it accounts for.
+    """
+    summary = nll_summary(nll, frame_rate)
+    total_nats = summary["total"]["nats_per_frame"]
+    records = [
+        {
+            "scope": name,
+            "codebook": "—",
+            "nats_per_frame": values["nats_per_frame"],
+            "kbits_per_second": values["kbits_per_second"],
+            "share_pct": 100.0 * values["nats_per_frame"] / total_nats
+            if total_nats
+            else 0.0,
+        }
+        for name, values in summary.items()
+    ]
+    per_codebook = nll.mean(axis=0)
+    records.extend(
+        {
+            "scope": "semantic" if index == 0 else "audio",
+            "codebook": f"{index:02d}",
+            "nats_per_frame": float(nats),
+            "kbits_per_second": float(nats) * NATS_TO_BITS * frame_rate / 1000.0,
+            "share_pct": 100.0 * float(nats) / total_nats if total_nats else 0.0,
+        }
+        for index, nats in enumerate(per_codebook)
     )
-    arrays = dict(np.load(entropy_dir / f"{model}_entropy.npz"))
-    if "sequence_positions" not in arrays:
-        arrays["sequence_positions"] = arrays["audio_positions"]
-    return payload, arrays
+    return records
 
 
-def compute_entropy_row(
+def load_metrics(
+    metrics_dir: Path, model: str
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Load one row's ``{summary payload, per-frame arrays}`` written by this module."""
+    metrics_dir = Path(metrics_dir)
+    payload = json.loads(
+        (metrics_dir / f"{model}_metrics.json").read_text(encoding="utf-8")
+    )
+    return payload, dict(np.load(metrics_dir / f"{model}_metrics.npz"))
+
+
+def compute_row_metrics(
     row: int, *, model: str, data_root: str | Path = DEFAULT_DATA_ROOT
 ) -> Path:
+    """Score one featurized row and write its ``MODEL_metrics.{npz,json}``."""
     feature_dir = Path(data_root) / f"{model}_featurized" / str(row)
     if not (feature_dir / "metadata.json").exists():
         raise FileNotFoundError(
@@ -118,15 +143,23 @@ def compute_entropy_row(
     sequences, metadata = FeaturizedSequence.load_all(feature_dir)
     if not sequences:
         raise ValueError(f"No featurized sequences in {feature_dir}")
-    num_codebooks = int(metadata["num_codebooks"])
+    num_codebooks = sequences[0].layout.num_codebooks
 
-    per_frame: list[np.ndarray] = []
+    token_sequences, _ = TokenizedSequence.load_all(
+        Path(data_root) / f"{model}_tokenized" / str(row)
+    )
+
+    entropy_parts: list[np.ndarray] = []
+    nll_parts: list[np.ndarray] = []
     positions: list[np.ndarray] = []
     sequence_summaries: list[dict[str, Any]] = []
-    for features, sequence_meta in zip(sequences, metadata["sequences"]):
-        entropy, sequence_positions = audio_entropy_frames(features, num_codebooks)
-        per_frame.append(entropy.numpy().astype(np.float32))
-        positions.append(sequence_positions.numpy())
+    for features, tokenized, sequence_meta in zip(
+        sequences, token_sequences, metadata["sequences"]
+    ):
+        metrics = audio_frame_metrics(features, tokenized.tokens, num_codebooks)
+        entropy_parts.append(metrics["entropy"].numpy().astype(np.float32))
+        nll_parts.append(metrics["nll"].numpy().astype(np.float32))
+        positions.append(metrics["positions"].numpy())
         sequence_summaries.append(
             {
                 "sequence_id": sequence_meta["sequence_id"],
@@ -141,26 +174,32 @@ def compute_entropy_row(
             }
         )
 
-    entropy_dir = Path(data_root) / "entropy" / str(row)
-    entropy_dir.mkdir(parents=True, exist_ok=True)
-    per_frame_concat = np.concatenate(per_frame)
+    metrics_dir = Path(data_root) / "metrics" / str(row)
+    metrics_dir.mkdir(parents=True, exist_ok=True)
+    entropy = np.concatenate(entropy_parts)
+    nll = np.concatenate(nll_parts)
     sequence_positions = np.concatenate(positions)
-    frame_offsets = np.cumsum([0, *(len(item) for item in per_frame)], dtype=np.int64)
+    frame_offsets = np.cumsum([0, *(len(item) for item in entropy_parts)], dtype=np.int64)
 
     np.savez_compressed(
-        entropy_dir / f"{model}_entropy.npz",
-        entropy=per_frame_concat,
+        metrics_dir / f"{model}_metrics.npz",
+        entropy=entropy,
+        nll=nll,
         sequence_positions=sequence_positions,
         frame_offsets=frame_offsets,
     )
-    (entropy_dir / f"{model}_entropy.json").write_text(
+    frame_rate = float(metadata["frame_rate"])
+    summary = nll_summary(nll, frame_rate)
+    (metrics_dir / f"{model}_metrics.json").write_text(
         json.dumps(
             {
                 "model": metadata["model"],
                 "row": int(metadata["row"]),
                 "frame_rate": metadata["frame_rate"],
                 "num_codebooks": num_codebooks,
-                "codebook_entropy": per_frame_concat.mean(axis=0).tolist(),
+                "codebook_entropy": (entropy.mean(axis=0) * NATS_TO_BITS).tolist(),
+                "codebook_nll_bits": (nll.mean(axis=0) * NATS_TO_BITS).tolist(),
+                "nll_summary": summary,
                 "sequences": sequence_summaries,
             },
             indent=2,
@@ -168,18 +207,22 @@ def compute_entropy_row(
         encoding="utf-8",
     )
 
-    mean_bits = float(per_frame_concat.mean() * NATS_TO_BITS)
     print(
-        f"{model} row {row}: {len(per_frame_concat):,} frames, "
-        f"{mean_bits:.3f} bits mean -> {entropy_dir}"
+        f"{model} row {row}: {len(entropy):,} frames | "
+        + " | ".join(
+            f"{name} {values['nats_per_frame']:.2f} nats/frame "
+            f"({values['kbits_per_second']:.2f} kbit/s)"
+            for name, values in summary.items()
+        )
+        + f" -> {metrics_dir}"
     )
-    return entropy_dir
+    return metrics_dir
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Compute predictive entropy summaries from featurized rows. "
+            "Compute per-frame entropy and NLL summaries from featurized rows. "
             f"Defaults: all MODEL_featurized under {DEFAULT_DATA_ROOT}, "
             "every featurized row."
         ),
@@ -219,7 +262,7 @@ def main() -> None:
             if not rows:
                 raise FileNotFoundError(f"No featurized rows found under {featurized}")
         for row in rows:
-            compute_entropy_row(row, model=model, data_root=root)
+            compute_row_metrics(row, model=model, data_root=root)
 
 
 if __name__ == "__main__":
