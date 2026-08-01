@@ -1,22 +1,24 @@
 # Notebooks
 
-Analysis of TTS model predictions over codebooks - predictive entropy, teacher-forced NLL (CE) of ground-truth codes on samples from the Expresso dataset.
+Analysis of TTS model predictions over codebooks - predictive entropy, teacher-forced NLL (CE loss) of ground-truth audio codes on samples from the Expresso dataset.
 
 ## Reproduce
 
 Run from the repo root. Each step feeds the next:
 
-**1. Dataprep** — tokenize + featurize a model's rows into `data/expresso/MODEL_featurized/ROW/`:
+**1. Dataprep** — tokenize + featurize a model's rows into `data/DATASET/featurized/MODEL/ROW/` (DATASET defaults to `expresso`):
 
 ```bash
 python -m dataprep.prepare --model miso --stage all
 ```
 
-**2. Compute metrics (negative log likelihood - NLL, predictive entropy)** — read the featurized rows summarize model logits and write to `data/expresso/metrics/ROW/MODEL_metrics.{npz,json}`:
+**2. Compute metrics (negative log likelihood - NLL, predictive entropy)** — read the featurized rows summarize model logits and write to `data/DATASET/metrics/MODEL/ROW/MODEL_metrics.{npz,json}`:
 
 ```bash
 python notebooks/frame_metrics.py --model miso
 ```
+
+Runs every featurized row by default; pass `--rows N` for just the first N.
 
 **3. Explore** — open the marimo notebook and pick a model / row:
 
@@ -33,14 +35,18 @@ marimo edit notebooks/metrics_explore.py
 
 Global row view — miso
 
-Along with entropy plotted above, the Teacher-forced NLL is also computed — how many bits each model spends to reproduce the ground-truth audio codes. Lower value means better predicted/compressed.
+Along with entropy plotted above, the Teacher-forced NLL (CE loss) is also computed — how many bits each model spends to reproduce the ground-truth audio codes. Lower value means better predicted/compressed.
 
 
-| Model | Codebooks | Frame rate | Semantic kbit/s (nats/frame) | Audio kbit/s (nats/frame) | Total kbit/s (nats/frame) |
-| ----- | --------- | ---------- | ---------------------------- | ------------------------- | ------------------------- |
-| miso  | 32        | 12.5 Hz    | 0.034 (1.87)                 | 5.246 (290.91)            | 5.280 (292.78)            |
-| qwen3 | 16        | 12.5 Hz    | 0.151 (8.36)                 | 1.545 (85.67)             | 1.696 (94.04)             |
-| fish  | 10        | 21 Hz      | 0.131 (4.32)                 | 1.373 (45.31)             | 1.504 (49.63)             |
+Pooled over the first 3 Expresso rows (`--rows 3`):
+
+| Model | Codebooks | Frame rate (Hz) | Semantic kbit/s (avg NLL) | Audio kbit/s (avg NLL per codebook) | Total kbit/s (avg NLL per codebook) |
+| ----- | --------- | --------------- | ---------------------------- | -------------------------------------- | -------------------------------------- |
+| miso  | 32        | 12.5            | 0.031 (1.75)                 | 2.357 (4.22)                           | 2.389 (4.14)                           |
+| qwen3 | 16        | 12.5            | 0.150 (8.29)                 | 1.524 (5.63)                           | 1.673 (5.80)                           |
+| fish  | 10        | 21              | 0.139 (4.60)                 | 1.358 (4.98)                           | 1.498 (4.94)                           |
 
 
-The NLL in nats/frame is normalized to kbits/s computed as  (`nats × log2(e) × frame_rate`). This accounts for differences in frame rate and number of codebooks making it more comparable. qwen3 and fish land within ~13% of each other despite a 2× gap in nats/frame. miso is the outlier at ~3.5× the bitrate, spread over 32 codebooks.
+For multiple audio codebooks we average `avg NLL per codebook = avg_K (NLL_k); K=num_codebooks` (so each group's figure is the per-codebook cost of one frame, in nats), while for semantic codes this is directly the NLL/CE loss. This is then normalized to `kbits/s` computed as  `kbits/s = avg NLL per codebook × log2(e) × frame_rate x num_codebooks / 1000`, multiplying the count back in so the semantic and audio bitrates sum to the total.
+
+This normalization accounts for differences in frame rate and number of codebooks making it more comparable. All three land in the same 1.5–2.4 kbit/s band despite differing codebook counts and frame rates. miso spends the most (~1.6× fish) but spreads it over 32 codebooks, so its per-codebook cost is the lowest of the three; it also has by far the cheapest semantic stream, predicting codebook 0 at 1.75 nats where qwen3 needs 8.29.

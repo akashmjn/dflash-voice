@@ -12,6 +12,10 @@ import numpy as np
 DEFAULT_DATASET = "Zackh/expresso-contextual"
 DEFAULT_SPLIT = "train"
 
+# Short slug used for the on-disk artifact directory (data/DATASET_NAME/...),
+# as opposed to DEFAULT_DATASET, the HF hub dataset id.
+DATASET_NAME = "expresso"
+
 
 @dataclass(frozen=True)
 class RawExample:
@@ -96,10 +100,25 @@ def _iter_selected_rows(dataset: str, split: str, rows: set[int]):
             return
 
 
+def expresso_row_count(
+    dataset: str = DEFAULT_DATASET, split: str = DEFAULT_SPLIT
+) -> int:
+    """Number of rows in the Expresso split, read from dataset info (no streaming)."""
+    from datasets import load_dataset
+
+    stream = load_dataset(dataset, split=split, streaming=True)
+    split_info = (stream.info.splits or {}).get(split)
+    if split_info is None or not split_info.num_examples:
+        raise ValueError(
+            f"Could not determine row count for {dataset!r} split {split!r}"
+        )
+    return int(split_info.num_examples)
+
+
 def download_expresso(
     rows: Iterable[int] = (0, 1, 2),
     *,
-    root: str | Path = "data/expresso/raw",
+    root: str | Path = "data/raw",
     dataset: str = DEFAULT_DATASET,
     split: str = DEFAULT_SPLIT,
 ) -> list[RawExample]:

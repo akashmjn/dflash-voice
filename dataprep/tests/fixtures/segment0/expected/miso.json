@@ -1,5 +1,5 @@
 {
-  "length": 364,
+  "length": 363,
   "layout": {
     "num_codebooks": 32,
     "text_channel": -1,
@@ -42,26 +42,26 @@
     [
       "text",
       0,
-      66
+      65
     ],
     [
       "audio",
-      66,
-      363
+      65,
+      362
     ],
     [
       "special",
-      363,
-      364
+      362,
+      363
     ]
   ],
   "audio_frames": 297,
   "tokens_shape": [
-    364,
+    363,
     33
   ],
   "mask_shape": [
-    364,
+    363,
     33
   ]
 }

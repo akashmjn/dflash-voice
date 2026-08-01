@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -13,13 +15,37 @@ from dataprep.common import (
     TokenizedSequence,
     _as_torch,
 )
-from dataprep.expresso import download_expresso, load_raw_example
+from dataprep.expresso import (
+    DATASET_NAME,
+    DEFAULT_DATASET,
+    download_expresso,
+    expresso_row_count,
+    load_raw_example,
+)
 
 
 DEFAULT_MODELS = {
     "qwen3": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
     "fish": "mlx-community/fish-audio-s2-pro-8bit",
 }
+
+DEFAULT_DATA_ROOT = Path("data")
+DEFAULT_LOG_ROOT = DEFAULT_DATA_ROOT / "dataprep_logs"
+
+
+def log_failure(log_root: Path, *, stage: str, row: int, exc: BaseException) -> None:
+    """Append a failure record to ``log_root/failures.jsonl`` and print it."""
+    tqdm.write(f"{stage}: row {row} failed, skipping: {exc}")
+
+    log_root.mkdir(parents=True, exist_ok=True)
+    record = {
+        "stage": stage,
+        "row": row,
+        "error": str(exc),
+        "traceback": traceback.format_exc(),
+    }
+    with (log_root / "failures.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
 
 
 def load_tokenizer(model: str, model_id: str | None = None, device: str | None = None):
@@ -110,14 +136,21 @@ def build_sequences(
     tokenizer,
     *,
     audio_codes: Mapping[int, Any],
+    row: int,
+    log_root: Path,
     pack_segments: bool = False,
 ) -> list[TokenizedSequence]:
     if pack_segments:
         return _pack_segments(segments, tokenizer, audio_codes=audio_codes)
-    return [
-        tokenizer.apply_chat_template([segment], audio_codes=audio_codes)
-        for segment in tqdm(segments, desc="tokenize", unit="seg", leave=False)
-    ]
+    sequences: list[TokenizedSequence] = []
+    for segment in tqdm(segments, desc="tokenize", unit="seg", leave=False):
+        try:
+            sequences.append(
+                tokenizer.apply_chat_template([segment], audio_codes=audio_codes)
+            )
+        except Exception as exc:
+            log_failure(log_root, stage="tokenize", row=row, exc=exc)
+    return sequences
 
 
 def prepare_row(
@@ -125,8 +158,10 @@ def prepare_row(
     *,
     model: str,
     tokenizer,
-    output_root: str | Path = "data",
+    output_root: str | Path = DEFAULT_DATA_ROOT,
+    dataset: str = DATASET_NAME,
     pack_segments: bool = False,
+    log_root: Path = DEFAULT_LOG_ROOT,
 ) -> Path:
     example, audio = load_raw_example(row_dir)
     row = example.row
@@ -158,6 +193,11 @@ def prepare_row(
         Segment.from_transcript_item(raw, source_dataset_id=example.row)
         for raw in example.segments
     ]
+    # Number the speakers 0, 1, ... in order of first appearance in the row, so
+    # the id is the small turn-taking index Miso's text prefix expects.
+    speaker_ids: dict[str, int] = {}
+    for segment in segments:
+        segment.speaker_id = speaker_ids.setdefault(segment.speaker, len(speaker_ids))
     sequences = build_sequences(
         segments,
         tokenizer,
@@ -166,15 +206,17 @@ def prepare_row(
             channel_codes,
             frame_rate=tokenizer.audio_codec.frame_rate,
         ),
+        row=row,
+        log_root=log_root,
         pack_segments=pack_segments,
     )
-    output_dir = Path(output_root) / "expresso" / f"{model}_tokenized" / str(row)
+    output_dir = Path(output_root) / dataset / "tokenized" / model / str(row)
     TokenizedSequence.save_all(
         output_dir,
         sequences,
         metadata={
             "model": model,
-            "dataset": "Zackh/expresso-contextual",
+            "dataset": DEFAULT_DATASET,
             "row": example.row,
             "frame_rate": tokenizer.audio_codec.frame_rate,
         },
@@ -188,25 +230,28 @@ def featurize_row(
     *,
     model: str,
     featurizer,
-    data_root: str | Path = "data",
+    data_root: str | Path = DEFAULT_DATA_ROOT,
+    dataset: str = DATASET_NAME,
     dump_kv: bool = False,
+    log_root: Path = DEFAULT_LOG_ROOT,
 ) -> Path:
-    input_dir = Path(data_root) / "expresso" / f"{model}_tokenized" / str(row)
+    input_dir = Path(data_root) / dataset / "tokenized" / model / str(row)
     sequences, source_metadata = TokenizedSequence.load_all(input_dir)
     tqdm.write(
         f"Featurizing row {row}: {len(sequences)} sequence(s)"
         + (" with KV cache" if dump_kv else "")
     )
-    features = [
-        featurizer.featurize(sequence, include_kv=dump_kv)
-        for sequence in tqdm(
-            sequences, desc=f"row {row} featurize", unit="seq", leave=False
-        )
-    ]
-    for sequence, feature in zip(sequences, features):
-        feature.validate(sequence_length=sequence.length)
+    features = []
+    for sequence in tqdm(sequences, desc=f"row {row} featurize", unit="seq", leave=False):
+        try:
+            feature = featurizer.featurize(sequence, include_kv=dump_kv)
+            feature.validate(sequence_length=sequence.length)
+        except Exception as exc:
+            log_failure(log_root, stage="featurize", row=row, exc=exc)
+            continue
+        features.append(feature)
 
-    feature_dir = Path(data_root) / "expresso" / f"{model}_featurized" / str(row)
+    feature_dir = Path(data_root) / dataset / "featurized" / model / str(row)
     FeaturizedSequence.save_all(
         feature_dir,
         features,
@@ -222,10 +267,9 @@ def featurize_row(
 
 
 def resolve_rows(*, debug: int | None) -> list[int]:
+    """Rows to process: the first ``debug`` rows, or the whole dataset by default."""
     if debug is None:
-        raise NotImplementedError(
-            "Full-dataset parquet export is not implemented yet; pass --debug [N]"
-        )
+        return list(range(expresso_row_count()))
     if debug < 1:
         raise ValueError("--debug requires a positive row count")
     return list(range(debug))
@@ -248,9 +292,21 @@ def main() -> None:
         type=int,
         default=None,
         metavar="N",
-        help="Prepare the first N Expresso rows (default: 3).",
+        help="Prepare only the first N Expresso rows (N defaults to 3 when the "
+        "flag is given without a value). Omit to process the entire dataset.",
     )
-    parser.add_argument("--data-root", type=Path, default=Path("data"))
+    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument(
+        "--dataset",
+        default=DATASET_NAME,
+        help=f"Dataset slug for the on-disk artifact directory (default: {DATASET_NAME}).",
+    )
+    parser.add_argument(
+        "--log-root",
+        type=Path,
+        default=DEFAULT_LOG_ROOT,
+        help=f"Directory for failure logs (default: {DEFAULT_LOG_ROOT}).",
+    )
     parser.add_argument("--model-id", default=None)
     parser.add_argument("--device", default=None)
     parser.add_argument(
@@ -266,7 +322,7 @@ def main() -> None:
     args = parser.parse_args()
 
     rows = resolve_rows(debug=args.debug)
-    raw_root = args.data_root / "expresso" / "raw"
+    raw_root = args.data_root / args.dataset / "raw"
     missing = [
         row
         for row in rows
@@ -287,7 +343,9 @@ def main() -> None:
                     model=args.model,
                     tokenizer=tokenizer,
                     output_root=args.data_root,
+                    dataset=args.dataset,
                     pack_segments=args.pack_segments,
+                    log_root=args.log_root,
                 )
             )
     if args.stage in ("featurize", "all"):
@@ -298,7 +356,9 @@ def main() -> None:
                     model=args.model,
                     featurizer=tokenizer.featurizer,
                     data_root=args.data_root,
+                    dataset=args.dataset,
                     dump_kv=args.dump_kv,
+                    log_root=args.log_root,
                 )
             )
     for path in paths:

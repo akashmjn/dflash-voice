@@ -7,15 +7,18 @@
   "nll_frames": 499,
   "nll_summary": {
     "semantic": {
-      "nats_per_frame": 4.2026,
+      "avg_nll_per_codebook": 4.2026,
+      "num_codebooks": 1,
       "kbits_per_second": 0.1273
     },
     "audio": {
-      "nats_per_frame": 45.7567,
+      "avg_nll_per_codebook": 5.0841,
+      "num_codebooks": 9,
       "kbits_per_second": 1.3863
     },
     "total": {
-      "nats_per_frame": 49.9593,
+      "avg_nll_per_codebook": 4.9959,
+      "num_codebooks": 10,
       "kbits_per_second": 1.5136
     }
   },

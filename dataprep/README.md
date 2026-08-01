@@ -55,20 +55,23 @@ and kbit/s. `notebooks/frame_metrics.py` drives these across rows.
 ## On-disk layout
 
 ```text
-data/DATASET/                   # e.g. data/expresso/
+data/DATASET/                   # e.g. data/expresso/ — DATASET defaults to
+                                 # dataprep.expresso.DATASET_NAME; override with --dataset
   raw/ROW/
     audio.wav                 # channel-first; transcript times in seconds
     transcript_segments.json
     MODEL_codebooks.pt        # temporary per-model codec dump, (F, C) per channel
-  MODEL_tokenized/ROW/
+  tokenized/MODEL/ROW/
     sequences.pt              # ragged list[{tokens, mask}] shaped (L, C+1)
     metadata.json             # one layout for the row + per-sequence length/spans
-  MODEL_featurized/ROW/
+  featurized/MODEL/ROW/
     features.pt               # ragged list[{logits, hiddens}] of length L-1
     metadata.json             # same shape; layout also carries hidden/logit dims
     kv_context.pt             # only with --dump-kv
-  metrics/ROW/                # written by notebooks/frame_metrics.py
+  metrics/MODEL/ROW/           # written by notebooks/frame_metrics.py
     MODEL_metrics.{npz,json}
+  wds/MODEL/{train,val}/       # written by dataprep/export_wds.py
+    MODEL_train_00000.tar
 ```
 
 ## Environments

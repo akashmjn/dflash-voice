@@ -47,6 +47,8 @@ class Segment:
     speaker: str
     start_sec: float
     end_sec: float
+    #: Unique value assigned by transforming `speaker: str` during dataprep
+    speaker_id: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -77,6 +79,7 @@ class Segment:
 
 @dataclass(frozen=True)
 class TokenSequenceSpan:
+    """Pointers to [start, end) contiguous regions on a ``(L, C+1)`` token sequence."""
     source_dataset_id: int
     segment_id: int
     start: int
@@ -216,7 +219,12 @@ def _as_torch_tree(value: Any):
 
 @dataclass
 class TokenizedSequence:
-    """Model-ready tokens/mask shaped ``(L, num_codebooks + 1)``."""
+    """Model-ready stack of ``tokens`` (integer array) shaped ``(L, num_codebooks + 1)``.
+
+    Contains text tokens (+1), and semantic + audio codec tokens arranged a model-specific 
+    arrangement described by ``layout``. ``spans`` demarcates contiguous regions of the
+    token sequence (e.g. text, audio, ...) for interpretation by the consumer.
+    """
 
     tokens: Any
     mask: Any
@@ -347,10 +355,12 @@ class TokenizedSequence:
 class FeaturizedSequence:
     """Teacher-forced outputs aligned to a ``TokenizedSequence`` of length ``L``.
 
-    ``hiddens`` and each ``logits[k]`` have length ``L - 1``. Index ``i`` is the
-    model output after ``tokens[i]``, i.e. the distribution / state used to
-    predict ``tokens[i + 1]``. Select regions with the same spans as the source
-    sequence (for an audio span ``[s, e)``, predictions live at ``[s - 1, e - 1)``).
+    ``hiddens`` and each ``logits[k]`` have length ``L - 1``. Index ``i`` holds
+    model outputs when processing ``tokens[i]``, i.e. the distribution / state used to
+    predict ``tokens[i + 1]``.
+
+    For example, given a span of audio tokens ``[s, e)`` in the tokenized sequence,
+    corresponding features predicting it are ``[s - 1, e - 1)`` in featurized sequence.
     """
 
     logits: dict[int, Any]
@@ -546,9 +556,15 @@ def nll_summary(nll: Any, frame_rate: float) -> dict[str, dict[str, float]]:
     """Teacher-forced CE for the ``semantic`` / ``audio`` / ``total`` code groups.
 
     ``nll`` is ``(frames, num_codebooks)`` in nats. Each group reports
-    ``nats_per_frame`` — summed over the group's codebooks, so it is the CE of
-    emitting that whole part of a frame — and the same figure as a bitrate,
-    ``kbits_per_second = nats * log2(e) * frame_rate / 1000``.
+    ``avg_nll_per_codebook`` — the NLL averaged over both frames and the group's
+    codebooks, so it is the per-codebook cost of one frame and stays comparable
+    across models with different codebook counts — plus ``num_codebooks`` for
+    that group and the bitrate it implies::
+
+        kbits_per_second = avg_nll * log2(e) * frame_rate * num_codebooks / 1000
+
+    Multiplying the count back in makes kbit/s the group's whole share of the
+    stream, so ``semantic`` and ``audio`` kbit/s sum to ``total``.
     """
     nll = _as_numpy(nll)
     groups = {
@@ -558,9 +574,11 @@ def nll_summary(nll: Any, frame_rate: float) -> dict[str, dict[str, float]]:
     }
     summary = {}
     for name, values in groups.items():
-        nats = float(values.sum(axis=1).mean())
+        count = int(values.shape[1])
+        avg_nll = float(values.mean()) if count else 0.0
         summary[name] = {
-            "nats_per_frame": nats,
-            "kbits_per_second": nats * NATS_TO_BITS * frame_rate / 1000.0,
+            "avg_nll_per_codebook": avg_nll,
+            "num_codebooks": count,
+            "kbits_per_second": avg_nll * NATS_TO_BITS * frame_rate * count / 1000.0,
         }
     return summary

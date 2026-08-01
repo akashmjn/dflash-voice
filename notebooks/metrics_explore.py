@@ -14,6 +14,7 @@ def _():
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from frame_metrics import (
+        DATASET_NAME,
         DEFAULT_DATA_ROOT,
         NATS_TO_BITS,
         codebook_mean_records,
@@ -27,6 +28,7 @@ def _():
         range=["#1f77b4", "#ff7f0e", "#2ca02c"],
     )
     return (
+        DATASET_NAME,
         DEFAULT_DATA_ROOT,
         NATS_TO_BITS,
         Path,
@@ -41,7 +43,7 @@ def _():
 
 
 @app.cell
-def _(DEFAULT_DATA_ROOT, mo):
+def _(DATASET_NAME, DEFAULT_DATA_ROOT, mo):
     model = mo.ui.dropdown(
         options={"Fish": "fish", "Qwen3": "qwen3", "Miso": "miso"},
         value="Miso",
@@ -49,13 +51,16 @@ def _(DEFAULT_DATA_ROOT, mo):
     )
     row = mo.ui.number(start=0, step=1, value=0, label="Expresso row")
     data_root = mo.ui.text(value=str(DEFAULT_DATA_ROOT), label="Data root")
-    mo.hstack([model, row, data_root], justify="start")
-    return data_root, model, row
+    dataset = mo.ui.text(value=DATASET_NAME, label="Dataset")
+    mo.hstack([model, row, data_root, dataset], justify="start")
+    return data_root, dataset, model, row
 
 
 @app.cell(hide_code=True)
-def _(NATS_TO_BITS, Path, data_root, load_metrics, model, row):
-    source = Path(data_root.value) / "metrics" / str(int(row.value))
+def _(NATS_TO_BITS, Path, data_root, dataset, load_metrics, model, row):
+    source = (
+        Path(data_root.value) / dataset.value / "metrics" / model.value / str(int(row.value))
+    )
     payload, arrays = load_metrics(source, model.value)
     entropy_bits = arrays["entropy"] * NATS_TO_BITS  # raw per-frame (frames, codebooks)
     nll_nats = arrays["nll"]  # raw per-frame NLL in nats (frames, codebooks)
@@ -76,30 +81,44 @@ def _(NATS_TO_BITS, Path, data_root, load_metrics, model, row):
 @app.cell(hide_code=True)
 def _(mo, nll_breakdown_records):
     def nll_table(nll_nats, frame_rate, title):
-        # Teacher-forced CE of the ground-truth codes. Group rows sum over their
-        # codebooks, so semantic + audio = total and kbit/s reads as a bitrate.
+        # Teacher-forced CE of the ground-truth codes. NLL is averaged per
+        # codebook; kbit/s multiplies the count back in, so semantic + audio = total.
         records = nll_breakdown_records(nll_nats, frame_rate)
         groups = [item for item in records if item["codebook"] == "—"]
         books = [item for item in records if item["codebook"] != "—"]
 
-        def rows(items, label):
-            header = f"| {label} | nats/frame | kbit/s | % share |\n| --- | ---: | ---: | ---: |\n"
-            body = "".join(
-                f"| {item['codebook'] if label == 'Codebook' else item['scope']}"
-                f"{' (' + item['scope'] + ')' if label == 'Codebook' else ''} "
-                f"| {item['nats_per_frame']:.2f} "
+        def group_rows(items):
+            header = (
+                "| Group | Codebooks | kbit/s | avg NLL per codebook | % share |\n"
+                "| --- | ---: | ---: | ---: | ---: |\n"
+            )
+            return header + "".join(
+                f"| {item['scope']} | {item['num_codebooks']} "
                 f"| {item['kbits_per_second']:.3f} "
-                f"| {item['share_pct']:.3f}\n"
+                f"| {item['avg_nll_per_codebook']:.2f} "
+                f"| {item['share_pct']:.1f}% |\n"
                 for item in items
             )
-            return header + body
+
+        def codebook_rows(items):
+            header = (
+                "| Codebook | Group | kbit/s | avg NLL | % share |\n"
+                "| --- | --- | ---: | ---: | ---: |\n"
+            )
+            return header + "".join(
+                f"| {item['codebook']} | {item['scope']} "
+                f"| {item['kbits_per_second']:.3f} "
+                f"| {item['avg_nll_per_codebook']:.2f} "
+                f"| {item['share_pct']:.1f}% |\n"
+                for item in items
+            )
 
         return mo.vstack(
             [
                 mo.md(f"**{title}**"),
-                mo.md(rows(groups, "Group")),
+                mo.md(group_rows(groups)),
                 mo.accordion(
-                    {"Per-codebook breakdown": mo.md(rows(books, "Codebook"))}
+                    {"Per-codebook breakdown": mo.md(codebook_rows(books))}
                 ),
             ]
         )
