@@ -23,9 +23,7 @@ python benchmark_mlx/bench_tts_mlx.py --backend qwen3
 python benchmark_mlx/bench_tts_mlx.py --backend fish
 ```
 
-This will help reproduce benchmark results shown above on a local Apple Silicon laptop with MLX support.
-
-To reproduce the entropy analysis ([discussed below](#why)), see [dataprep](dataprep/README.md) for the data-prep pipeline and [notebooks](notebooks/README.md) for computing and exploring the per-frame metrics.
+This will reproduce local inference benchmark results shown below (needs an Apple Silicon laptop with MLX support). 
 
 ## Benchmark results (per-codec-frame breakdown)
 
@@ -62,6 +60,8 @@ Specifically, I am exploring both discrete and continuous approaches to generati
 2. Continuous: single-step flow matching inspired by [MeanFlows](https://github.com/haidog-yaqub/MeanFlow)
 
 More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!
+
+> To reproduce the analysis above see [analysis](analysis/README.md).
 
 > P.S.: original project motivation: how can we do speculative decoding for TTS/multimodal voice models? Turns out specdec for TTS is complicated by the dual-RVQ (semantic backbone + audio depth decoder) codec structure used by most SoTA models. So the initial project focus is on a narrower bottleneck to begin: training models to speed up/simplify RVQ audio codec generation. Will revisit/rename repo appropriately based on progress :)
 

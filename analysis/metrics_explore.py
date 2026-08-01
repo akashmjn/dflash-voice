@@ -13,7 +13,7 @@ def _():
     import marimo as mo
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from frame_metrics import (
+    from model_metrics import (
         DATASET_NAME,
         DEFAULT_DATA_ROOT,
         NATS_TO_BITS,

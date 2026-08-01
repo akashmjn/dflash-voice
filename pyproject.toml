@@ -34,6 +34,7 @@ dev = [
 dataprep = [
     "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
     "soundfile",
+    "typer",
     "pytest",
 ]
 dataprep-mlx = [
@@ -45,6 +46,7 @@ dataprep-mlx = [
     "scipy",
     "soundfile",
     "torch",
+    "typer",
     "pytest",
     "marimo",
     "altair",

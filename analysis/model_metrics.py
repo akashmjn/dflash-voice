@@ -13,8 +13,8 @@ Scoring itself lives in `dataprep.common` (`audio_frame_metrics` and
 batch driver plus the record shaping that `metrics_explore.py` charts.
 
 ```bash
-python notebooks/frame_metrics.py
-python notebooks/frame_metrics.py --model fish
+python analysis/model_metrics.py compute --model fish
+python analysis/model_metrics.py summarize --rows 3
 ```
 
 `DEFAULT_DATA_ROOT` is the repo-relative artifact root (`data`).
@@ -22,13 +22,13 @@ python notebooks/frame_metrics.py --model fish
 
 from __future__ import annotations
 
-import argparse
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import numpy as np
 import torch
+import typer
 
 from dataprep.common import (
     NATS_TO_BITS,
@@ -42,6 +42,12 @@ from dataprep.common import (
 from dataprep.expresso import DATASET_NAME
 
 DEFAULT_DATA_ROOT = Path("data")
+MODELS = ("miso", "qwen3", "fish")
+
+app = typer.Typer(
+    add_completion=False,
+    help="Compute and summarize per-frame entropy / NLL metrics for featurized rows.",
+)
 
 
 def group_entropy_bits(entropy_bits: np.ndarray, mid: int) -> dict[str, np.ndarray]:
@@ -232,63 +238,174 @@ def compute_row_metrics(
     return metrics_dir
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=(
-            "Compute per-frame entropy and NLL summaries from featurized rows. "
-            f"Defaults: all models under {DEFAULT_DATA_ROOT}/{DATASET_NAME}/featurized, "
-            "every featurized row."
-        ),
+def available_rows(directory: Path, limit: int | None = None) -> list[int]:
+    """Sorted numeric row directories under ``directory``, optionally the first ``limit``."""
+    rows = sorted(
+        int(path.name)
+        for path in directory.glob("*")
+        if path.is_dir() and path.name.isdigit()
     )
-    parser.add_argument("--model", choices=("miso", "qwen3", "fish"), default=None)
-    parser.add_argument(
-        "--rows",
-        type=int,
-        default=None,
-        metavar="N",
-        help="Process the first N featurized rows (default: all available).",
-    )
-    parser.add_argument(
-        "--data-root",
-        type=Path,
-        default=DEFAULT_DATA_ROOT,
-        help=f"Artifact root (default: {DEFAULT_DATA_ROOT}).",
-    )
-    parser.add_argument(
-        "--dataset",
-        default=DATASET_NAME,
-        help=f"Dataset slug for the on-disk artifact directory (default: {DATASET_NAME}).",
-    )
-    args = parser.parse_args()
-    root = args.data_root / args.dataset
+    return rows[:limit] if limit is not None else rows
 
-    models = (
-        [args.model]
-        if args.model
-        else sorted(
-            path.name for path in (root / "featurized").glob("*") if path.is_dir()
+
+def model_summary(
+    model: str,
+    *,
+    data_root: str | Path = DEFAULT_DATA_ROOT,
+    dataset: str = DATASET_NAME,
+    limit: int | None = None,
+) -> dict[str, Any] | None:
+    """Pool every computed row for ``model`` into one :func:`nll_summary`.
+
+    Concatenating frames (rather than averaging per-row summaries) weights each
+    row by its length, so the result is the same as scoring the rows as one
+    stream. Returns ``None`` when no metrics have been computed yet.
+    """
+    metrics_root = Path(data_root) / dataset / "metrics" / model
+    if not metrics_root.is_dir():
+        return None
+    rows = available_rows(metrics_root, limit)
+    parts: list[np.ndarray] = []
+    frame_rate: float | None = None
+    num_codebooks: int | None = None
+    for row in rows:
+        payload, arrays = load_metrics(metrics_root / str(row), model)
+        parts.append(arrays["nll"])
+        frame_rate = float(payload["frame_rate"])
+        num_codebooks = int(payload["num_codebooks"])
+    if not parts:
+        return None
+    nll = np.concatenate(parts)
+    return {
+        "model": model,
+        "rows": len(rows),
+        "frames": int(nll.shape[0]),
+        "frame_rate": frame_rate,
+        "num_codebooks": num_codebooks,
+        "nll_summary": nll_summary(nll, frame_rate),
+    }
+
+
+SUMMARY_COLUMNS = (
+    "Model",
+    "Codebooks",
+    "Frame rate (Hz)",
+    "Semantic NLL (nats)",
+    "Audio NLL/codebook avg (nats)",
+    "Semantic kbit/s",
+    "Audio kbit/s",
+    "Total kbit/s",
+)
+
+
+def summary_table(summaries: list[dict[str, Any]]) -> str:
+    """Markdown table of per-model bitrate and avg NLL, one row per model.
+
+    Cells are space-padded to a fixed per-column width so the table lines up when
+    printed to a terminal; it still parses as GitHub-flavored markdown.
+    """
+    rows = [
+        [
+            item["model"],
+            str(item["num_codebooks"]),
+            f"{item['frame_rate']:g}",
+            f"{item['nll_summary']['semantic']['avg_nll_per_codebook']:.2f}",
+            f"{item['nll_summary']['audio']['avg_nll_per_codebook']:.2f}",
+            f"{item['nll_summary']['semantic']['kbits_per_second']:.3f}",
+            f"{item['nll_summary']['audio']['kbits_per_second']:.3f}",
+            f"{item['nll_summary']['total']['kbits_per_second']:.3f}",
+        ]
+        for item in summaries
+    ]
+    widths = [
+        max(len(name), *(len(row[index]) for row in rows)) if rows else len(name)
+        for index, name in enumerate(SUMMARY_COLUMNS)
+    ]
+
+    def line(cells: list[str] | tuple[str, ...]) -> str:
+        # First column left-aligned (names); numeric columns right-aligned.
+        padded = [
+            cell.ljust(widths[0]) if index == 0 else cell.rjust(widths[index])
+            for index, cell in enumerate(cells)
+        ]
+        return "| " + " | ".join(padded) + " |\n"
+
+    rule = (
+        "|"
+        + "|".join(
+            ("-" * (width + 2)) if index == 0 else ("-" * (width + 1) + ":")
+            for index, width in enumerate(widths)
         )
+        + "|\n"
+    )
+    return line(SUMMARY_COLUMNS) + rule + "".join(line(row) for row in rows)
+
+
+@app.command()
+def compute(
+    model: Optional[str] = typer.Option(
+        None, help=f"Model to score (default: every model found). One of {MODELS}."
+    ),
+    rows: Optional[int] = typer.Option(
+        None, "--rows", "-n", help="Score the first N featurized rows (default: all)."
+    ),
+    data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="Artifact root."),
+    dataset: str = typer.Option(DATASET_NAME, help="Dataset slug for artifact paths."),
+) -> None:
+    """Compute entropy/NLL metrics per model and row, and save them to disk."""
+    root = data_root / dataset
+    if model is not None and model not in MODELS:
+        raise typer.BadParameter(f"Unknown model {model!r}; expected one of {MODELS}")
+    if rows is not None and rows < 1:
+        raise typer.BadParameter("--rows requires a positive row count")
+
+    models = [model] if model else sorted(
+        path.name for path in (root / "featurized").glob("*") if path.is_dir()
     )
     if not models:
-        raise FileNotFoundError(f"No model directories under {root / 'featurized'}")
+        raise typer.BadParameter(f"No model directories under {root / 'featurized'}")
 
-    if args.rows is not None and args.rows < 1:
-        raise ValueError("--rows requires a positive row count")
+    for name in models:
+        featurized = root / "featurized" / name
+        found = available_rows(featurized, rows)
+        if not found:
+            raise typer.BadParameter(f"No featurized rows found under {featurized}")
+        for row in found:
+            compute_row_metrics(row, model=name, data_root=data_root, dataset=dataset)
 
-    for model in models:
-        featurized = root / "featurized" / model
-        rows = sorted(
-            int(path.name)
-            for path in featurized.glob("*")
-            if path.is_dir() and path.name.isdigit()
+
+@app.command()
+def summarize(
+    rows: Optional[int] = typer.Option(
+        None, "--rows", "-n", help="Summarize the first N computed rows (default: all)."
+    ),
+    data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="Artifact root."),
+    dataset: str = typer.Option(DATASET_NAME, help="Dataset slug for artifact paths."),
+) -> None:
+    """Print a summary table pooling all computed rows, one line per model."""
+    if rows is not None and rows < 1:
+        raise typer.BadParameter("--rows requires a positive row count")
+
+    summaries = [
+        item
+        for item in (
+            model_summary(name, data_root=data_root, dataset=dataset, limit=rows)
+            for name in MODELS
         )
-        if not rows:
-            raise FileNotFoundError(f"No featurized rows found under {featurized}")
-        if args.rows is not None:
-            rows = rows[: args.rows]
-        for row in rows:
-            compute_row_metrics(row, model=model, data_root=args.data_root, dataset=args.dataset)
+        if item is not None
+    ]
+    if not summaries:
+        raise typer.BadParameter(
+            f"No computed metrics under {data_root / dataset / 'metrics'}; "
+            "run `compute` first"
+        )
+    counts = ", ".join(
+        f"{item['model']} {item['rows']} rows / {item['frames']:,} frames"
+        for item in summaries
+    )
+    typer.echo(f"Pooled over {counts}\n")
+    typer.echo(summary_table(summaries))
 
 
 if __name__ == "__main__":
-    main()
+    app()
