@@ -33,7 +33,7 @@ marimo edit notebooks/metrics_explore.py
 - **Global view** — averaged metrics per-codebook and as a grouped time series over the whole file.
 - **Per-segment explorer** — the same views for one selected sequence in the file.
 
-Global row view — miso
+[Global row view — miso](screenshots/global_miso.png)
 
 Along with entropy plotted above, the Teacher-forced NLL (CE loss) is also computed — how many bits each model spends to reproduce the ground-truth audio codes. Lower value means better predicted/compressed.
 
