@@ -22,7 +22,6 @@ Reference model: ``mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit``
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from typing import Generator, List, Optional, Tuple
 
 import mlx.core as mx
@@ -34,29 +33,14 @@ from mlx_lm.sample_utils import (
     categorical_sampling,
 )
 
-from tts_mlx._common import GenerationResult, _make_result
+from benchmark_mlx._common import (
+    GenerationProfile,
+    GenerationResult,
+    StepTiming,
+    _make_result,
+)
 
 MLX_AUDIO_VERSION = "0.4.4"
-
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class FrameTiming:
-    frame_idx: int
-    backbone_semantic_s: float
-    depth_audio_s: float
-    total_s: float
-
-
-@dataclass
-class GenerationProfile:
-    frame_timings: List[FrameTiming] = field(default_factory=list)
-    codec_decode_s: float = 0.0
-    num_frames: int = 0
-
 
 # ---------------------------------------------------------------------------
 # Sampling (from mlx_audio Model._sample_token)
@@ -453,9 +437,9 @@ def _generate_codec_frames(
         generated_frames.append(frame_t)
 
         if profile is not None:
-            profile.frame_timings.append(
-                FrameTiming(
-                    frame_idx=len(generated_frames) - 1,
+            profile.step_timings.append(
+                StepTiming(
+                    step_idx=len(generated_frames) - 1,
                     backbone_semantic_s=backbone_semantic_s,
                     depth_audio_s=depth_audio_s,
                     total_s=total_s,
@@ -558,7 +542,7 @@ class Qwen3TTS:
             segments = [text]
 
         for segment_idx, segment_text in enumerate(segments):
-            start_time = time.time()
+            start_time = time.perf_counter()
 
             prefill_embeds, text_stream, text_pad_embed = _prepare_prompt(
                 self._model,
@@ -597,7 +581,7 @@ class Qwen3TTS:
                         is_streaming_chunk=True,
                         is_final_chunk=is_final,
                     )
-                    chunk_start = time.time()
+                    chunk_start = time.perf_counter()
                     if is_final:
                         mx.clear_cache()
                 elif event == "done":
@@ -613,7 +597,7 @@ class Qwen3TTS:
                 t_decode = time.perf_counter()
                 audio = _codec_decode_frames(self._model, generated_frames)
                 segment_profile.codec_decode_s = time.perf_counter() - t_decode
-                segment_profile.num_frames = len(generated_frames)
+                segment_profile.num_steps = len(generated_frames)
             else:
                 audio = _codec_decode_frames(self._model, generated_frames)
 

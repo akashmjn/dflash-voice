@@ -77,15 +77,15 @@ data/DATASET/                   # e.g. data/expresso/ — DATASET defaults to
 ## Environments
 
 MisoTTS pins Transformers 4.49 while the tested MLX stack pins Transformers
-5.6 / `huggingface-hub` 1.5, so `dataprep` and `dataprep-mlx` (and `tts_mlx`)
+5.6 / `huggingface-hub` 1.5, so `dataprep-miso` and `dataprep-mlx` (and `benchmark_mlx`)
 conflict — install only one extra per environment:
 
 ```bash
-# Miso stack
-uv pip install -e ".[dataprep]"
-# For local Miso development, replace the installed package:
-uv pip install -e ../MisoTTS
-
-# Qwen3 / Fish MLX stack (replaces the Miso pins above)
+# Qwen3 / Fish MLX stack 
 uv pip install -e ".[dataprep-mlx]"
+
+# Miso stack (replaces the pins above)
+uv pip install -e ".[dataprep-miso]"
+# For using a locally cloned MisoTTS repo, replace the installed package:
+uv pip install -e ../MisoTTS
 ```

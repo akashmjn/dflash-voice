@@ -11,14 +11,15 @@ dependencies = [
     "datasets",
     "requests",
     "huggingface-hub",
+    "typer",
 ]
 
 [tool.setuptools.packages.find]
-include = ["tts_mlx*", "dataprep*"]
-exclude = ["tts_mlx.tests*", "dataprep.tests*"]
+include = ["benchmark_mlx*", "dataprep*"]
+exclude = ["benchmark_mlx.tests*", "dataprep.tests*"]
 
 [project.optional-dependencies]
-tts_mlx = [
+benchmark_mlx = [
     "mlx>=0.31.1",
     "mlx-lm==0.31.1",
     "mlx-audio==0.4.4",
@@ -31,10 +32,9 @@ dev = [
     "modal",
 ]
 
-dataprep = [
+dataprep-miso = [
     "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
     "soundfile",
-    "typer",
     "pytest",
 ]
 dataprep-mlx = [
@@ -46,7 +46,6 @@ dataprep-mlx = [
     "scipy",
     "soundfile",
     "torch",
-    "typer",
     "pytest",
     "marimo",
     "altair",

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
-from typing import Any, Optional
+from dataclasses import dataclass, field
+from typing import Any, List, Optional
 
 import mlx.core as mx
 
@@ -14,6 +14,24 @@ def _format_duration(seconds: float) -> str:
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
+
+
+@dataclass
+class StepTiming:
+    """One autoregressive step: a semantic token from the backbone, then the
+    remaining codebooks of the same codec frame from the depth decoder."""
+
+    step_idx: int
+    backbone_semantic_s: float
+    depth_audio_s: float
+    total_s: float
+
+
+@dataclass
+class GenerationProfile:
+    step_timings: List[StepTiming] = field(default_factory=list)
+    codec_decode_s: float = 0.0
+    num_steps: int = 0
 
 
 @dataclass
@@ -45,10 +63,10 @@ def _make_result(
     is_final_chunk: bool = False,
     profile: Optional[Any] = None,
 ) -> GenerationResult:
-    elapsed = time.time() - start_time
+    elapsed = time.perf_counter() - start_time
     samples = int(audio.shape[0])
     duration_seconds = samples / model.sample_rate
-    rtf = duration_seconds / elapsed if elapsed > 0 else 0.0
+    rtf = elapsed / duration_seconds if duration_seconds > 0 else 0.0
 
     return GenerationResult(
         audio=audio,

@@ -1,4 +1,4 @@
-"""Parity tests: tts_mlx backends vs the mlx-audio implementations they port.
+"""Parity tests: benchmark_mlx backends vs the mlx-audio implementations they port.
 
 Parity covers both the generated audio and the wall-clock time to produce it: the
 point of these ports is to be no slower than mlx-audio while staying bit-comparable.
@@ -26,7 +26,7 @@ class Backend:
     # mlx-audio's Qwen3 entrypoint takes the language as `lang_code`.
     ref_kwargs: dict = field(default_factory=dict)
     supports_streaming: bool = True
-    # Fish falls back to a nonzero RAS temperature (see tts_mlx/fish.py), so its
+    # Fish falls back to a nonzero RAS temperature (see benchmark_mlx/fish.py), so its
     # decoding stays stochastic even at temperature=0 and needs a fixed seed.
     needs_seed: bool = False
 
@@ -34,7 +34,7 @@ class Backend:
 BACKENDS = {
     "qwen3": Backend(
         model_id="mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
-        loader="tts_mlx.qwen3",
+        loader="benchmark_mlx.qwen3",
         sample_rate=24000,
         gen_kwargs=dict(
             text="Hello, this is a quick Qwen3 TTS test on Apple Silicon.",
@@ -47,7 +47,7 @@ BACKENDS = {
     ),
     "fish": Backend(
         model_id="mlx-community/fish-audio-s2-pro-8bit",
-        loader="tts_mlx.fish",
+        loader="benchmark_mlx.fish",
         sample_rate=44100,
         gen_kwargs=dict(
             text="[excited] Hello, this is a quick Fish Audio test on Apple Silicon.",

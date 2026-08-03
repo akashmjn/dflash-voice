@@ -279,9 +279,9 @@ class Qwen3Tokenizer:
         language: str = "english",
     ):
         if model is None:
-            from tts_mlx.qwen3 import load_model
+            from mlx_audio.tts.utils import load_model
 
-            model = load_model(model_id)._model
+            model = load_model(model_id)
         self._model = model
         self.voice = voice
         self.language = language

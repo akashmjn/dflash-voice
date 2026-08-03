@@ -202,9 +202,9 @@ class FishTokenizer:
         model: Any | None = None,
     ):
         if model is None:
-            from tts_mlx.fish import load_model
+            from mlx_audio.tts.utils import load_model
 
-            model = load_model(model_id)._model
+            model = load_model(model_id)
         self._model = model
         self.audio_codec = FishAudioCodec(model.codec)
         self.text_tokenizer = model.tokenizer

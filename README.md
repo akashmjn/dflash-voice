@@ -10,7 +10,7 @@ The goal of this project is to speed up TTS and multimodal voice LLM inference, 
 ## Install
 
 ```bash
-uv pip install -e ".[tts_mlx,dev]"
+uv pip install -e ".[benchmark_mlx]"
 ```
 
 Pinned deps match mlx-audio's tested stack (`mlx-lm==0.31.1`, `transformers==5.6.0`).
@@ -18,9 +18,10 @@ Pinned deps match mlx-audio's tested stack (`mlx-lm==0.31.1`, `transformers==5.6
 ## Quick start
 
 ```bash
-# Will download models to HF_CACHE on first run
-python benchmark_mlx/bench_tts_mlx.py --backend qwen3
-python benchmark_mlx/bench_tts_mlx.py --backend fish
+# downloads models to HF_CACHE on first run
+python benchmark_mlx/bench_tts_mlx.py --model qwen3
+python benchmark_mlx/bench_tts_mlx.py --model fish
+python benchmark_mlx/bench_tts_mlx.py --model miso
 ```
 
 This will reproduce local inference benchmark results shown below (needs an Apple Silicon laptop with MLX support). 

@@ -22,13 +22,17 @@ Reference model: ``mlx-community/fish-audio-s2-pro-8bit``
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
 from functools import partial
-from typing import Generator, List, Optional
+from typing import Generator, Optional
 
 import mlx.core as mx
 
-from tts_mlx._common import GenerationResult, _make_result
+from benchmark_mlx._common import (
+    GenerationProfile,
+    GenerationResult,
+    StepTiming,
+    _make_result,
+)
 from mlx_audio.tts.models.fish_qwen3_omni.prompt import (
     Conversation,
     Message,
@@ -44,26 +48,6 @@ MLX_AUDIO_VERSION = "0.4.4"
 RAS_WIN_SIZE = 10
 RAS_HIGH_TEMP = 1.0
 RAS_HIGH_TOP_P = 0.9
-
-# ---------------------------------------------------------------------------
-# Types
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class TokenTiming:
-    token_idx: int
-    backbone_semantic_s: float
-    depth_audio_s: float
-    total_s: float
-
-
-@dataclass
-class GenerationProfile:
-    token_timings: List[TokenTiming] = field(default_factory=list)
-    codec_decode_s: float = 0.0
-    num_tokens: int = 0
-
 
 # ---------------------------------------------------------------------------
 # Sampling (from mlx_audio Model._sample_logits / _sample_semantic)
@@ -326,9 +310,9 @@ def _generate_codes(
             mx.eval(previous_codebooks)
             depth_audio_s = time.perf_counter() - t1
             total_s = time.perf_counter() - t_step
-            profile.token_timings.append(
-                TokenTiming(
-                    token_idx=len(generated_steps),
+            profile.step_timings.append(
+                StepTiming(
+                    step_idx=len(generated_steps),
                     backbone_semantic_s=backbone_semantic_s,
                     depth_audio_s=depth_audio_s,
                     total_s=total_s,
@@ -435,7 +419,7 @@ class FishAudioTTS:
 
         conversation = Conversation(list(base_conversation.messages))
         for segment_idx, batch_text in enumerate(batches):
-            start_time = time.time()
+            start_time = time.perf_counter()
 
             conversation.append(
                 Message(
@@ -463,7 +447,7 @@ class FishAudioTTS:
                 t_decode = time.perf_counter()
                 audio = _decode_codes(self._model, codes)
                 segment_profile.codec_decode_s = time.perf_counter() - t_decode
-                segment_profile.num_tokens = int(codes.shape[1])
+                segment_profile.num_steps = int(codes.shape[1])
             else:
                 audio = _decode_codes(self._model, codes)
 
