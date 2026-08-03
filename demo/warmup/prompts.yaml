@@ -1,0 +1,20 @@
+# Pre-generated warmup clips used to prime Miso's context in demo_tts_podcast.py.
+#
+# Miso's first turn is unstable when generated from empty context, and that
+# instability propagates -- the opening turn seeds the context for everything
+# after it. Priming with fixed clips avoids generating anything cold.
+#
+# `text` is the transcript fed to Miso as context and must match what is spoken,
+# so the bracket tags below are Fish-only generation cues and are NOT part of it.
+#
+# Fish writes 44.1kHz; the demo resamples to Miso's 24kHz on load.
+segments:
+  - speaker: 0
+    audio: warmup_spk0.wav
+    text: Okay, we're recording! Let's get into it.
+    prompt: "[female] Okay, we're recording! Let's get into it."
+
+  - speaker: 1
+    audio: warmup_spk1.wav
+    text: Sounds good, ready when you are!
+    prompt: "[curious] Sounds good, ready when you are!"

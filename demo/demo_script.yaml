@@ -1,0 +1,44 @@
+# Two-speaker podcast script for demo_tts_podcast.py.
+# Each segment is {speaker: 0|1, text: ...}. Roughly one minute of dialogue.
+segments:
+  - speaker: 0
+    text: So I finally got the whole thing running on my laptop last night. No server, no API key, nothing.
+
+  - speaker: 1
+    text: Wait, the full model? On a laptop?
+
+  - speaker: 0
+    text: The full model. Eight billion parameters, quantized down to eight bits, running right on the neural engine.
+
+  - speaker: 1
+    text: Okay, but what's the catch? There's always a catch with these things.
+
+  - speaker: 0
+    text: The catch is memory. It eats about nine gigabytes just sitting there, and it climbs while it's generating.
+
+  - speaker: 1
+    text: That's actually not terrible. I was expecting you to say something like forty.
+
+  - speaker: 0
+    text: Right? And the quality holds up. It sounds like a person, not a robot reading a phone book.
+
+  - speaker: 1
+    text: So what's it doing under the hood? Is it just predicting waveforms?
+
+  - speaker: 0
+    text: Not quite. It predicts codec frames, twelve and a half per second, and each frame is a stack of thirty-two codebooks.
+
+  - speaker: 1
+    text: And then something decodes that back into audio.
+
+  - speaker: 0
+    text: Exactly. That last step is cheap. The expensive part is the frames, because it's autoregressive.
+
+  - speaker: 1
+    text: Which means it can't parallelize. Every frame waits on the one before it.
+
+  - speaker: 0
+    text: That's the whole ballgame. That's why the speedup work matters so much.
+
+  - speaker: 1
+    text: Alright, you've convinced me. Send me the repo and I'll try to break it.

@@ -36,6 +36,9 @@ tmp/
 benchmark_mlx/output
 benchmark_gpu/output
 
+# Demo renders (warmup/ clips are checked in; rendered podcasts are not)
+demo/output
+
 # Dataprep downloads and generated artifacts
 data/
 
