@@ -15,8 +15,8 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["benchmark_mlx*", "dataprep*"]
-exclude = ["benchmark_mlx.tests*", "dataprep.tests*"]
+include = ["benchmark_mlx*", "dataprep*", "train*"]
+exclude = ["benchmark_mlx.tests*", "dataprep.tests*", "train.tests*"]
 
 [project.optional-dependencies]
 benchmark_mlx = [
@@ -25,6 +25,15 @@ benchmark_mlx = [
     "mlx-audio==0.4.4",
     "transformers==5.6.0",
     "huggingface-hub==1.5.0",
+]
+
+train = [
+    "transformers==5.6.0",
+    "torch>=2.2.0",
+    "webdataset>=0.2.100",
+    "accelerate>=0.30.0",
+    "numpy",
+    "tqdm",
 ]
 
 dev = [

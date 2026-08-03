@@ -267,19 +267,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--rows",
-        nargs="+",
-        type=int,
-        metavar="N",
-        help="Explicit row indices to export.",
-    )
-    parser.add_argument(
-        "--debug",
         nargs="?",
         const=3,
         type=int,
         default=None,
         metavar="N",
-        help="Export first N rows (default 3). Shorthand for --rows 0 1 ... N-1.",
+        help="Export first N rows (default 3).",
     )
     parser.add_argument(
         "--split-ratio",
@@ -301,15 +294,7 @@ def main() -> None:
     parser.add_argument("--shuffle-seed", type=int, default=42)
     args = parser.parse_args()
 
-    if args.rows and args.debug is not None:
-        parser.error("Specify --rows or --debug, not both.")
-    if args.debug is not None:
-        rows = list(range(args.debug))
-    elif args.rows:
-        rows = args.rows
-    else:
-        parser.error("Specify --rows or --debug.")
-
+    rows = list(range(args.rows))
     output_root = args.output_root or args.data_root
     export(
         rows,

@@ -7,8 +7,9 @@ Each WDS sample (produced by dataprep.export_wds) contains:
   kv.npy       — float16 (F, layers, 2, heads, kv_dim)  [optional]
 
 ``FramePackingIterableDataset`` accumulates audio frames from consecutive
-sequences and yields fixed-size batches without padding or masking.  The
-yielded dict has:
+sequences and yields fixed-size batches without padding or masking.  With
+``drop_last=False`` the final batch may hold fewer than ``batch_frames`` rows.
+The yielded dict has:
   hiddens:  (batch_frames, hidden_dim)   float32
   targets:  (batch_frames, num_codebooks) int64
   semantic: (batch_frames,)              int64   == targets[:, 0]
@@ -60,6 +61,10 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
         resampled: if True, shards are sampled with replacement (infinite stream,
             good for training). If False, each shard is visited once (for validation).
         use_kv: if True, expect and include ``kv.npy`` in each batch.
+        drop_last: if True (default), trailing frames that do not fill a whole
+            batch are discarded. Set False for single-pass evaluation, where
+            dropping up to ``batch_frames - 1`` frames would silently shrink the
+            split; the final batch is then smaller than ``batch_frames``.
     """
 
     def __init__(
@@ -70,6 +75,7 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
         shuffle_buffer: int = 1000,
         resampled: bool = True,
         use_kv: bool = False,
+        drop_last: bool = True,
     ):
         super().__init__()
         self.shard_urls = shard_urls
@@ -77,6 +83,7 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
         self.shuffle_buffer = shuffle_buffer
         self.resampled = resampled
         self.use_kv = use_kv
+        self.drop_last = drop_last
 
     def __iter__(self) -> Iterator[dict]:
         pipeline = _wds_pipeline(
@@ -115,13 +122,18 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
                 yield self._drain(buf_h, buf_t, buf_kv)
                 buf_frames -= self.batch_frames
 
+        if not self.drop_last and buf_frames > 0:
+            yield self._drain(buf_h, buf_t, buf_kv, n=buf_frames)
+
     def _drain(
         self,
         buf_h: list[np.ndarray],
         buf_t: list[np.ndarray],
         buf_kv: list[np.ndarray],
+        *,
+        n: int | None = None,
     ) -> dict:
-        n = self.batch_frames
+        n = self.batch_frames if n is None else n
         h_cat = np.concatenate(buf_h, axis=0)  # (total, H)
         t_cat = np.concatenate(buf_t, axis=0)  # (total, K)
 
@@ -161,6 +173,7 @@ def make_dataloader(
     shuffle_buffer: int = 1000,
     resampled: bool = True,
     use_kv: bool = False,
+    drop_last: bool = True,
     num_workers: int = 4,
     pin_memory: bool = True,
 ) -> torch.utils.data.DataLoader:
@@ -171,6 +184,7 @@ def make_dataloader(
         shuffle_buffer=shuffle_buffer,
         resampled=resampled,
         use_kv=use_kv,
+        drop_last=drop_last,
     )
     return torch.utils.data.DataLoader(
         dataset,
