@@ -1,47 +1,38 @@
 # dflash-voice: Accelerating RVQ audio codec generation
 
-The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally. 
+The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
 
-(for context, see breakdown for Qwen3 TTS, Fish Audio S2 models below).
+<details>
+<summary>Breakdown of per-component MLX inference times for Qwen3 TTS, Fish Audio S2 models</summary>
+
 ![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
 
-> Currently actively WIP: to read a little more about the motivation and approach meantime, see section [Why](#why) below.
+</details>
 
-## Install
+See section [Why](#why) below for more details on the motivation and in-progress approach being explored to fixing this.
 
-```bash
-uv pip install -e ".[benchmark_mlx]"
-```
 
-Pinned deps match mlx-audio's tested stack (`mlx-lm==0.31.1`, `transformers==5.6.0`).
+## MLX inference benchmark breakdown
 
-## Quick start
-
-```bash
-# downloads models to HF_CACHE on first run
-python benchmark_mlx/bench_tts_mlx.py --model qwen3
-python benchmark_mlx/bench_tts_mlx.py --model fish
-python benchmark_mlx/bench_tts_mlx.py --model miso
-```
-
-This will reproduce local inference benchmark results shown below (needs an Apple Silicon laptop with MLX support). 
-
-## Benchmark results (per-codec-frame breakdown)
-
-6 prompts per model, 8-bit MLX checkpoints, 64GB M1 Max Apple Silicon. **Gen RTF** = codec-frame generation speed vs native frame rate; **Wall RTF** = end-to-end including codec decode.
-
-Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
-
+<details>
+<summary>Benchmark results (per-codec-frame breakdown)</summary>
 
 | Model            | Native  | Backbone (semantic codes) | Depth (audio codes) | Depth % | Depth iters | ms / depth iter | Total ms | Codec frames/s | Gen RTF | Wall RTF |
 | ---------------- | ------- | ------------------------- | ------------------- | ------- | ----------- | --------------- | -------- | -------------- | ------- | -------- |
 | Qwen3 1.7B 8bit  | 12.5 Hz | 9.4 ms                    | 17.0 ms             | 63%     | 15          | 1.13 ms         | 26.9 ms  | 37.2           | 2.98×   | 2.52×    |
 | Fish S2 Pro 8bit | 21 Hz   | 21.9 ms                   | 20.4 ms             | 48%     | 9           | 2.26 ms         | 42.3 ms  | 23.7           | 1.13×   | 0.92×    |
 
+6 prompts per model, 8-bit MLX checkpoints, 64GB M1 Max Apple Silicon. **Gen RTF** = codec-frame generation speed vs native frame rate; **Wall RTF** = end-to-end including codec decode.
+Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
 
-Raw metrics: (gitignored — regenerate with `benchmark_mlx/bench_tts_mlx.py`).
+</details>
+
+See [benmark_mlx](benchmark_mlx/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
+
 
 ## Why
+
+> To reproduce these results, see [analysis](analysis/README.md).
 
 This started after noticing an expensive memory bottleneck for audio tokens mentioned in the [Sesame CSM blog post](https://www.sesame.com/blog/crossing-the-uncanny-valley-of-voice). Why should audio tokens be comparably expensive to predict vs language tokens? Especially given the lower information density.
 
@@ -62,10 +53,7 @@ Specifically, I am exploring both discrete and continuous approaches to generati
 
 More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!
 
-> To reproduce the analysis above see [analysis](analysis/README.md).
-
-> P.S.: original project motivation: how can we do speculative decoding for TTS/multimodal voice models? Turns out specdec for TTS is complicated by the dual-RVQ (semantic backbone + audio depth decoder) codec structure used by most SoTA models. So the initial project focus is on a narrower bottleneck to begin: training models to speed up/simplify RVQ audio codec generation. Will revisit/rename repo appropriately based on progress :)
-
+> P.S.: Speculative decoding for TTS is complicated by the dual-RVQ (semantic backbone + audio depth decoder) codec structure used by most SoTA models. So the initial project focus is on a narrower bottleneck to begin: training models to speed up/simplify RVQ audio codec generation. Will revisit/rename repo appropriately based on progress :)
 
 
 ## Citation
@@ -81,7 +69,6 @@ If you use this repository, please cite:
   url          = {https://github.com/akashmjn/dflash-voice}
 }
 ```
-
 
 
 ### Related work

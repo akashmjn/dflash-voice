@@ -146,21 +146,25 @@ def render_miso(
     output: Path,
     use_warmup: bool = False,
 ) -> list[RenderedTurn]:
-    """Generate turn by turn, feeding prior turns back as Sesame ``Segment`` context."""
+    """Generate turn by turn, feeding prior turns back as Sesame ``Segment`` context.
+
+    Two key flags in `mlx-audio.model.generate()` usage:
+    - `voice_match=False` — when on, mlx-audio collapses context down to `context[0]` and folds its text into the prompt. That is meant for single-reference voice cloning and would silently destroy multi-turn context.
+    - `split_pattern=None` — otherwise a turn gets re-split on newlines into  
+    several generations.
+    """
     from mlx_audio.tts.models.sesame.sesame import Segment
     from mlx_lm.sample_utils import make_sampler
 
     sampler = make_sampler(
         temp=sampling["temperature"], top_k=sampling["top_k"], top_p=sampling["top_p"]
     )
-    # The script's speaker labels map onto the model's 0-indexed speaker ids.
-    speaker_id = {0: 0, 1: 1}
 
     def generate_turn(
         seg: ScriptSegment, history: list[RenderedTurn]
     ) -> RenderedTurn:
         context = [
-            Segment(speaker=speaker_id[t.speaker], text=t.text, audio=t.audio)
+            Segment(speaker=t.speaker, text=t.text, audio=t.audio)
             for t in history
         ]
         # Sampling occasionally emits EOS early and truncates the turn; the same
@@ -170,7 +174,7 @@ def render_miso(
             results = list(
                 model.generate(
                     text=seg.text,
-                    speaker=speaker_id[seg.speaker],
+                    speaker=seg.speaker,
                     context=context,
                     # One call == one turn: don't let mlx-audio re-split on
                     # newlines, and don't let voice_match collapse the multi-turn

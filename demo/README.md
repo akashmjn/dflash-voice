@@ -26,10 +26,3 @@ Result is generated at 1.8-2.1x RTF and ~11 GB peak memory (on M1 Apple Silicon 
 - **Fish backend.** `--model fish` is not wired up yet and exits with a message.  
 Fish has no `context`/`Segment` equivalent, so cross-turn continuity there  
 needs a different approach.
-
-Two key flags in MLX .generate() usage:
-
-- `voice_match=False` — when on, mlx-audio collapses context down to `context[0]` and folds its text into the prompt. That is meant for single-reference voice cloning and would silently destroy multi-turn context.
-- `split_pattern=None` — otherwise a turn gets re-split on newlines into  
-several generations.
-
