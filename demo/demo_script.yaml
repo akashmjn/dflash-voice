@@ -20,7 +20,7 @@ segments:
     text: That's actually not terrible. I was expecting you to say something like forty.
 
   - speaker: 0
-    text: Right? And the quality holds up. It sounds like a person, not a robot reading a phone book.
+    text: Right, and the quality holds up! It sounds like a person, not a robot reading a phone book.
 
   - speaker: 1
     text: So what's it doing under the hood? Is it just predicting waveforms?
@@ -29,12 +29,12 @@ segments:
     text: Not quite. It predicts codec frames, twelve and a half per second, and each frame is a stack of thirty-two codebooks.
 
   - speaker: 1
-    text: And then something decodes that back into audio.
+    text: And then something decodes that back into audio?
 
   - speaker: 0
     text: Exactly. That last step is cheap. The expensive part is the frames, because it's autoregressive.
 
-  - speaker: 1
+  - speaker: 0
     text: Which means it can't parallelize. Every frame waits on the one before it.
 
   - speaker: 0

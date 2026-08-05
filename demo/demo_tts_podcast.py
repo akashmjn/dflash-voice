@@ -3,6 +3,7 @@
 
 Usage:
     python agent-workspace/demo/demo_tts_podcast.py render SCRIPT.yaml --model miso
+    python agent-workspace/demo/demo_tts_podcast.py render --takes 3  # re-roll the whole script
     python agent-workspace/demo/demo_tts_podcast.py warmup   # re-roll priming clips
 
 The script is a YAML list of ``{speaker: 0|1, text: ...}`` segments. Segments are
@@ -38,7 +39,7 @@ MODELS = {
 }
 
 SAMPLING = {
-    "miso": {"temperature": 0.9, "top_k": 60, "top_p": 1.0},
+    "miso": {"temperature": 0.9, "top_k": 30, "top_p": 1.0},
     "fish": {"temperature": 0.7, "top_k": 30, "top_p": 0.7},
 }
 
@@ -256,7 +257,7 @@ def render(
     script: Path = typer.Argument(DEFAULT_DEMO_SCRIPT, help="YAML script of two-speaker segments"),
     model: str = typer.Option("miso", help="TTS backend"),
     model_id: str = typer.Option(None, help="override the backend's default model id"),
-    max_segments: int = typer.Option(None, help="render only the first N segments"),
+    max_turns: int = typer.Option(None, help="render only the first N segments"),
     context_seconds: float = typer.Option(
         DEFAULT_CONTEXT_SECONDS, help="max seconds of past audio kept as context"
     ),
@@ -268,8 +269,16 @@ def render(
     ),
     save_turns: bool = typer.Option(False, help="also write each turn as its own wav"),
     output_dir: Path = typer.Option(DEFAULT_OUTPUT_DIR, help="output directory (default: ./output)"),
+    takes: int = typer.Option(
+        1, min=1, help="render the script this many times, each to its own wav"
+    ),
 ) -> None:
-    """Render a two-speaker podcast script to a single stitched wav."""
+    """Render a two-speaker podcast script to a single stitched wav.
+
+    With ``--takes N`` the script is rendered N times from the same loaded model,
+    writing ``podcast_{model}_take{n}.wav`` per take. Sampling is stochastic, so
+    the takes differ; pick the one that sounds best.
+    """
     if model not in MODELS:
         raise typer.BadParameter(f"unknown backend {model!r}, expected one of {sorted(MODELS)}")
     if model != "miso":
@@ -278,39 +287,44 @@ def render(
         )
 
     segments = load_script(script)
-    if max_segments:
-        segments = segments[:max_segments]
+    if max_turns:
+        segments = segments[:max_turns]
 
     resolved_id = model_id or MODELS[model]
-    output = output_dir / f"podcast_{model}.wav"
 
     print(f"loading {resolved_id}")
     tts = load_model(resolved_id)
 
-    tic = time.perf_counter()
-    turns = render_miso(
-        tts,
-        segments,
-        context_seconds=context_seconds,
-        max_turn_seconds=max_turn_seconds,
-        sampling=SAMPLING[model],
-        save_turns=save_turns,
-        output=output,
-        use_warmup=warmup,
-    )
-    wall_s = time.perf_counter() - tic
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for take in range(1, takes + 1):
+        suffix = f"_take{take:02d}" if takes > 1 else ""
+        output = output_dir / f"podcast_{model}{suffix}.wav"
+        if takes > 1:
+            print(f"\n{'#' * 50}\ntake {take}/{takes} -> {output.name}\n{'#' * 50}")
 
-    audio, sample_rate = stitch(turns, TURN_GAP_S)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    audio_write(output, audio, sample_rate, format="wav")
+        tic = time.perf_counter()
+        turns = render_miso(
+            tts,
+            segments,
+            context_seconds=context_seconds,
+            max_turn_seconds=max_turn_seconds,
+            sampling=SAMPLING[model],
+            save_turns=save_turns,
+            output=output,
+            use_warmup=warmup,
+        )
+        wall_s = time.perf_counter() - tic
 
-    total_audio_s = audio.shape[0] / sample_rate
-    print(f"\n{'=' * 50}")
-    print(f"{len(turns)} turns, {total_audio_s:.1f}s audio in {wall_s:.1f}s")
-    print(f"overall RTF: {wall_s / max(total_audio_s, 1e-6):.2f}x")
-    print(f"peak memory: {mx.get_peak_memory() / 1e9:.2f} GB")
-    print(f"saved: {output}")
-    print(f"{'=' * 50}")
+        audio, sample_rate = stitch(turns, TURN_GAP_S)
+        audio_write(output, audio, sample_rate, format="wav")
+
+        total_audio_s = audio.shape[0] / sample_rate
+        print(f"\n{'=' * 50}")
+        print(f"{len(turns)} turns, {total_audio_s:.1f}s audio in {wall_s:.1f}s")
+        print(f"overall RTF: {wall_s / max(total_audio_s, 1e-6):.2f}x")
+        print(f"peak memory: {mx.get_peak_memory() / 1e9:.2f} GB")
+        print(f"saved: {output}")
+        print(f"{'=' * 50}")
 
 
 @app.command("warmup")
