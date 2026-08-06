@@ -27,7 +27,7 @@ Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/fra
 
 </details>
 
-See [benmark_mlx](benchmark_mlx/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
+See [benchmark_mlx](benchmark_mlx/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
 
 
 ## Why
@@ -38,11 +38,9 @@ This started after noticing an expensive memory bottleneck for audio tokens ment
 
 Taking a closer look at the predictive entropy over 32 [Mimi](https://huggingface.co/kyutai/mimi) RVQ codebooks for the [MisoTTS](https://github.com/MisoLabsAI/MisoTTS) depth audio decoder (8B repro of the CSM model) confirms this. The first 7 codebook tokens have quite low entropy/information content - as low as 0.75 bits. Do we really always need 32x300M param forward passes to generate 32 RVQ audio tokens?
 
-![Entropy vs RVQ codebook depth](docs/entropy-per-codebook.png)
+![Entropy vs RVQ codebook depth](docs/MisoCSM-codebook-entropy.png)
 
 From an information theory lens: there is clearly a varying rate of information density, both across depth (RVQ audio codebooks - first plot) and across time (codec frames - plotted below). Most modern TTS models (e.g. Qwen3 TTS, Fish Audio S2) have converged to an autoregressive 1-4B LLM `backbone_semantic` predicting semantic codes across time and smaller 100-400M `depth_audio` decoders predicting audio RVQ codebooks across depth.
-
-![Entropy vs codec frames i.e. time](docs/entropy-per-frame.png)
 
 Given what we've seen above, and inspired by speculative decoding and flow matching, it would be nice to get more bang for buck per model forward pass. Why not spend less compute on the easy stuff?
 
