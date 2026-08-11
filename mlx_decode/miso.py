@@ -27,7 +27,7 @@ import mlx.nn as nn
 from mlx_lm.models.cache import make_prompt_cache
 from mlx_lm.sample_utils import make_sampler
 
-from benchmark_mlx._common import (
+from mlx_decode._common import (
     GenerationProfile,
     GenerationResult,
     StepTiming,

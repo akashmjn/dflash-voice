@@ -27,7 +27,7 @@ from typing import Generator, Optional
 
 import mlx.core as mx
 
-from benchmark_mlx._common import (
+from mlx_decode._common import (
     GenerationProfile,
     GenerationResult,
     StepTiming,

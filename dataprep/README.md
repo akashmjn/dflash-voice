@@ -77,7 +77,7 @@ data/DATASET/                   # e.g. data/expresso/ — DATASET defaults to
 ## Environments
 
 MisoTTS pins Transformers 4.49 while the tested MLX stack pins Transformers
-5.6 / `huggingface-hub` 1.5, so `dataprep-miso` and `dataprep-mlx` (and `benchmark_mlx`)
+5.6 / `huggingface-hub` 1.5, so `dataprep-miso` and `dataprep-mlx` (and `mlx_decode`)
 conflict — install only one extra per environment:
 
 ```bash

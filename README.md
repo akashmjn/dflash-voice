@@ -27,7 +27,7 @@ Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/fra
 
 </details>
 
-See [benchmark_mlx](benchmark_mlx/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
+See [mlx_decode](mlx_decode/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
 
 
 ## Why

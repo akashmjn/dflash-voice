@@ -33,7 +33,7 @@ from mlx_lm.sample_utils import (
     categorical_sampling,
 )
 
-from benchmark_mlx._common import (
+from mlx_decode._common import (
     GenerationProfile,
     GenerationResult,
     StepTiming,

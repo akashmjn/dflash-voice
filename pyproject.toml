@@ -15,11 +15,11 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["benchmark_mlx*", "dataprep*", "train*"]
-exclude = ["benchmark_mlx.tests*", "dataprep.tests*", "train.tests*"]
+include = ["mlx_decode*", "dataprep*", "train*"]
+exclude = ["mlx_decode.tests*", "dataprep.tests*", "train.tests*"]
 
 [project.optional-dependencies]
-benchmark_mlx = [
+mlx_decode = [
     "mlx>=0.31.1",
     "mlx-lm==0.31.1",
     "mlx-audio==0.4.4",

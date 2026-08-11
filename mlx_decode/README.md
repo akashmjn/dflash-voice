@@ -4,11 +4,9 @@ This module ports the MLX TTS inference loop from [mlx-audio](https://github.com
 single-file module - allowing us to benchmark backbone vs depth decoding times.
 
 ```bash
-uv pip install -e ".[benchmark_mlx]"
+uv pip install -e ".[mlx_decode]"
 # downloads models to HF_CACHE on first run
-python benchmark_mlx/bench_tts_mlx.py --model qwen3
-python benchmark_mlx/bench_tts_mlx.py --model fish
-python benchmark_mlx/bench_tts_mlx.py --model miso
+python mlx_decode/bench.py --model <qwen3|fish|miso>
 ```
 
 Key components of the inference loop are ported: (prompt construction, autoregression, codec decode) while leveraging weights and `nn.Module` definitions from mlx-audio.
@@ -16,5 +14,5 @@ pytests verify parity of the ported inference loop with reference `mlx-audio` im
 
 ```bash
 uv pip install -e ".[dev]"
-pytest -v benchmark_mlx/tests/test_tts_mlx.py
+pytest -v mlx_decode/tests/test_decode_parity.py
 ```

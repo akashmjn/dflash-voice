@@ -3,7 +3,7 @@
 Renders a ~1min scripted two-speaker conversation with MLX TTS, using mlx-audio's native model APIs.
 
 ```bash
-uv pip install -e ".[benchmark_mlx]"
+uv pip install -e ".[mlx_decode]"
 python demo/demo_tts_podcast.py render --model miso --max-segments 6
 ```
 
@@ -17,7 +17,7 @@ segments:
     text: Wait, the full model? On a laptop?
 ```
 
-Result is generated at 1.8-2.1x RTF and ~11 GB peak memory (on M1 Apple Silicon for Miso 8-bit). As seen in `benchmark_mlx` this is counter-intuitively dominated by the 300M depth decoder generating RVQ audio tokens.
+Result is generated at 1.8-2.1x RTF and ~11 GB peak memory (on M1 Apple Silicon for Miso 8-bit). As seen in `mlx_decode` this is counter-intuitively dominated by the 300M depth decoder generating RVQ audio tokens.
 
 ## Notes
 

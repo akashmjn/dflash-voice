@@ -16,7 +16,7 @@ Context is trimmed to ``--context-seconds`` of past audio, oldest
 turns dropped first.
 
 Backends use mlx-audio's native ``load_model`` / ``model.generate``, not the
-hand-rolled ports in ``benchmark_mlx/``.
+hand-rolled ports in ``mlx_decode/``.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from mlx_audio.audio_io import write as audio_write
 from mlx_audio.tts.utils import load_model
 from mlx_audio.utils import load_audio, resample_audio
 
-# Matches benchmark_mlx/bench_tts_mlx.py.
+# Matches mlx_decode/bench.py.
 MODELS = {
     "miso": "mlx-community/MisoLabs-MisoTTS-8bit",
     "fish": "mlx-community/fish-audio-s2-pro-8bit",

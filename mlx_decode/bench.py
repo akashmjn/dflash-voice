@@ -6,7 +6,7 @@ reported per step: backbone (semantic token) and depth decoder (remaining
 codebooks) separately, plus codec decode.
 
 ```bash
-python benchmark_mlx/bench_tts_mlx.py --model miso --save-audio
+python mlx_decode/bench.py --model miso --save-audio
 ```
 """
 
@@ -23,7 +23,7 @@ import typer
 from rich import print
 from tqdm import tqdm
 
-from benchmark_mlx import GenerationProfile
+from mlx_decode import GenerationProfile
 
 
 MODELS = {
@@ -77,7 +77,7 @@ PROMPTS = [
     ),
 ]
 
-DEFAULT_OUTPUT_DIR = Path("benchmark_mlx/output")
+DEFAULT_OUTPUT_DIR = Path("mlx_decode/output")
 
 # Two-speaker priming turns for miso, at its native 24 kHz.
 # Miso being a base model appears to be unstable when generating from empty context 
@@ -166,7 +166,7 @@ def _run(
     warmup: bool,
 ) -> None:
     print(f"Loading {model_id}")
-    model = importlib.import_module(f"benchmark_mlx.{name}").load_model(model_id)
+    model = importlib.import_module(f"mlx_decode.{name}").load_model(model_id)
     if warmup:
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 

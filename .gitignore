@@ -33,7 +33,7 @@ agent-workspace/
 tmp/
 
 # Benchmark output
-benchmark_mlx/output
+mlx_decode/output
 benchmark_gpu/output
 
 # Demo renders (warmup/ clips are checked in; rendered podcasts are not)
