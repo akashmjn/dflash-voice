@@ -42,13 +42,14 @@ python -m dataprep.prepare --model miso --stage all --rows 10
 **2. Compute metrics (negative log likelihood - NLL, predictive entropy)** — read the featurized rows summarize model logits and write to `data/DATASET/metrics/MODEL/ROW/MODEL_metrics.{npz,json}`:
 
 ```bash
-python analysis/model_metrics.py compute --model miso
+cd experiments/expresso_nll_entropy
+python model_metrics.py compute --model miso
 ```
 
 `summarize` pools computed rows into the per-model table below with `--rows N` for just the first N:
 
 ```bash
-python analysis/model_metrics.py summarize --rows 10
+python model_metrics.py summarize --rows 10
 ```
 
 **3. Explore** — open the marimo notebook and pick a model / row:

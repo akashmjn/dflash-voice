@@ -13,11 +13,12 @@ Scoring itself lives in `dataprep.common` (`audio_frame_metrics` and
 batch driver plus the record shaping that `metrics_explore.py` charts.
 
 ```bash
-python analysis/model_metrics.py compute --model fish
-python analysis/model_metrics.py summarize --rows 3
+cd experiments/expresso_nll_entropy
+python model_metrics.py compute --model fish
+python model_metrics.py summarize --rows 3
 ```
 
-`DEFAULT_DATA_ROOT` is the repo-relative artifact root (`data`).
+`DEFAULT_DATA_ROOT` resolves to the repo-root `data/` dir regardless of cwd.
 """
 
 from __future__ import annotations
@@ -41,7 +42,9 @@ from dataprep.common import (
 )
 from dataprep.expresso import DATASET_NAME
 
-DEFAULT_DATA_ROOT = Path("data")
+# Anchor to the repo-root `data/` dir so the default holds no matter the cwd
+# (this file lives at <repo>/experiments/expresso_nll_entropy/model_metrics.py).
+DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 MODELS = ("miso", "qwen3", "fish")
 
 app = typer.Typer(

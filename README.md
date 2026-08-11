@@ -32,7 +32,7 @@ See [benchmark_mlx](benchmark_mlx/README.md) for more details on reproducing the
 
 ## Why
 
-> To reproduce these results, see [analysis](analysis/README.md).
+> To reproduce these results, see [experiments/expresso_nll_entropy](experiments/expresso_nll_entropy/README.md).
 
 This started after noticing an expensive memory bottleneck for audio tokens mentioned in the [Sesame CSM blog post](https://www.sesame.com/blog/crossing-the-uncanny-valley-of-voice). Why should audio tokens be comparably expensive to predict vs language tokens? Especially given the lower information density.
 

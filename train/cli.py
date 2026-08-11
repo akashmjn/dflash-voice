@@ -10,7 +10,7 @@ skip the multi-GB source file::
 
 Random init lands near ln(2051) = 7.63 nats.  The checkpoint lands near 4.26
 nats / 2.38 kbit/s over codebooks 1..31, matching the 4.29 that
-analysis/README.md quotes pooled over rows.  A checkpoint run stuck near 7.6
+experiments/expresso_nll_entropy/ quotes pooled over rows. A checkpoint run stuck near 7.6
 means the converter mismatched; one below ~2 means the causal mask is not
 applied and later codebooks are leaking.
 
@@ -282,7 +282,7 @@ def eval_command(
     typer.echo(f"avg nll    : {avg:.4f} nats  (range {min(per_codebook):.3f}-{max(per_codebook):.3f})")
     typer.echo(f"kbit/s     : {result['kbits_per_second']:.4f}")
 
-    # Orient the number: chance is the random-init floor, and analysis/README.md
+    # Orient the number: chance is the random-init floor, and experiments/expresso_nll_entropy/README.md
     # quotes 4.29 nats for this checkpoint pooled over rows.
     chance = math.log(2051)
     if avg > chance - 0.1:
