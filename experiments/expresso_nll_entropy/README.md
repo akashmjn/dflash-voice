@@ -21,12 +21,6 @@ Notes on calculation:
 - For multiple audio RVQ codebooks we average `avg NLL per codebook = avg_K (NLL_k); K=num_codebooks`. This is directly the NLL/CE loss for semantic codes.
 - It is then normalized to `kbits/s` computed as  `kbits/s = avg NLL per codebook × num_codebooks x log2(e) × frame_rate / 1000` - representing the information content in model predictions on the validation data.
 
-Included `marimo` notebook allows diving deeper:
-
-- **Global view** — averaged metrics per-codebook and as a grouped time series over the whole file.
-- **Per-segment explorer** — the same views for one selected sequence in the file.
-
-![Marimo notebook screenshot](screenshots/global_miso.png)
 
 ## Reproduce
 
@@ -57,4 +51,11 @@ python model_metrics.py summarize --rows 10
 ```bash
 marimo edit notebooks/metrics_explore.py
 ```
+
+Included `marimo` notebook allows diving deeper:
+
+- **Global view** — averaged metrics per-codebook and as a grouped time series over the whole file.
+- **Per-segment explorer** — the same views for one selected sequence in the file.
+
+![Marimo notebook screenshot](assets/MisoCSM-codebook-entropy.png)
 

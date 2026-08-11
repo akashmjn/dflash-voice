@@ -1,33 +1,17 @@
 # dflash-voice: Accelerating RVQ audio codec generation
 
-The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck (i.e. orange bars below), complicating inference especially when running locally.
-
-<details>
-<summary>Breakdown of per-component MLX inference times for Qwen3 TTS, Fish Audio S2 models</summary>
-
-![TTS MLX benchmark aggregate](docs/benchmark-per-frame.png)
-
-</details>
+The goal of this project is to speed up TTS and multimodal voice LLM inference, starting with RVQ (residual vector quantization) audio codec generation. This forms a surprisingly large bottleneck — RVQ audio-code (depth decoder) generation dominates the per-codec-frame cost — complicating inference especially when running locally.
 
 See section [Why](#why) below for more details on the motivation and in-progress approach being explored to fixing this.
 
 
 ## MLX inference benchmark breakdown
 
-<details>
-<summary>Benchmark results (per-codec-frame breakdown)</summary>
+A per-codec-frame timing breakdown across Qwen3, Fish, and Miso 8-bit MLX checkpoints shows depth-decoder RVQ audio-code generation dominating each frame's cost.
 
-| Model            | Native  | Backbone (semantic codes) | Depth (audio codes) | Depth % | Depth iters | ms / depth iter | Total ms | Codec frames/s | Gen RTF | Wall RTF |
-| ---------------- | ------- | ------------------------- | ------------------- | ------- | ----------- | --------------- | -------- | -------------- | ------- | -------- |
-| Qwen3 1.7B 8bit  | 12.5 Hz | 9.4 ms                    | 17.0 ms             | 63%     | 15          | 1.13 ms         | 26.9 ms  | 37.2           | 2.98×   | 2.52×    |
-| Fish S2 Pro 8bit | 21 Hz   | 21.9 ms                   | 20.4 ms             | 48%     | 9           | 2.26 ms         | 42.3 ms  | 23.7           | 1.13×   | 0.92×    |
+> For the full results table and chart, see [experiments/mlx_decode_breakdown](experiments/mlx_decode_breakdown/README.md).
 
-6 prompts per model, 8-bit MLX checkpoints, 64GB M1 Max Apple Silicon. **Gen RTF** = codec-frame generation speed vs native frame rate; **Wall RTF** = end-to-end including codec decode.
-Real-time budgets: Qwen3 @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
-
-</details>
-
-See [mlx_decode](mlx_decode/README.md) for more details on reproducing these results. You will need an Apple Silicon laptop with MLX support.
+See [mlx_decode](mlx_decode/README.md) for the benchmark harness and how to reproduce these results. You will need an Apple Silicon laptop with MLX support.
 
 
 ## Why
