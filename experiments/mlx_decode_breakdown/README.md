@@ -22,5 +22,5 @@ Use [`mlx_decode`](../../mlx_decode/README.md) benchmark harness. Run from the r
 ```bash
 uv pip install -e ".[mlx_decode]"
 # downloads models to HF_CACHE on first run
-python mlx_decode/cli.py --model <qwen3|fish|miso> 
+python mlx_decode/bench.py --model <qwen3|fish|miso> 
 ```
