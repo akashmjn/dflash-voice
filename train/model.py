@@ -15,7 +15,7 @@ Two off-by-ones stack, and both are load-bearing (see dataprep/miso.py:213):
 Slot 0's output is unused.  Level 31 is predicted but never fed back.
 
 The teacher-forcing shift (``hiddens[i]`` predicts ``targets[i]``) is already
-baked into the WDS shards by dataprep/export_wds.py -- do not re-apply it.
+baked into the WDS shards by dataprep/shards.py -- do not re-apply it.
 
 ``forward`` runs the Llama layers in an explicit loop rather than calling
 ``LlamaModel.__call__``.  That costs nothing today and keeps input assembly and

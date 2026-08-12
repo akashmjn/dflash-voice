@@ -1,6 +1,6 @@
 """WebDataset-backed iterable dataset for frame-level audio codec token prediction.
 
-Each WDS sample (produced by dataprep.export_wds) contains:
+Each WDS sample (produced by dataprep.shards) contains:
   hiddens.npy  — float16 (F, hidden_dim)
   targets.npy  — int16   (F, num_codebooks)
   meta.json    — provenance dict
@@ -18,17 +18,24 @@ The yielded dict has:
 Usage::
 
   from train.dataset import FramePackingIterableDataset
-  urls = "data/expresso/wds/miso/train/miso_train_{00000..00004}.tar"
-  ds = FramePackingIterableDataset(urls, batch_frames=2048)
+  ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train", batch_frames=2048)
+  # OR  ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train/miso_train_{00000..00012}.tar", batch_frames=2048)
+
   for batch in ds:
       loss = model(batch["hiddens"], batch["semantic"], batch["targets"])
+
+The default is a training stream: shuffled and resampled, so it never ends —
+stop it on a step budget. Pass ``eval_mode=True`` for a single ordered pass over
+the split instead.
 """
 
 from __future__ import annotations
 
 import io
 import json
+import os
 import warnings
+from pathlib import Path
 from typing import Iterator
 
 import numpy as np
@@ -36,26 +43,13 @@ import torch
 import torch.utils.data
 
 
-def _decode_npy(data: bytes) -> np.ndarray:
-    return np.load(io.BytesIO(data))
-
-
-def _wds_pipeline(shard_urls, *, shuffle_buffer: int, resampled: bool):
-    """Build a webdataset pipeline that yields raw sample dicts."""
-    import webdataset as wds
-
-    shardshuffle = 100 if shuffle_buffer > 0 else False
-    dataset = wds.WebDataset(shard_urls, resampled=resampled, shardshuffle=shardshuffle)
-    if shuffle_buffer > 0:
-        dataset = dataset.shuffle(shuffle_buffer)
-    return dataset
-
-
 class FramePackingIterableDataset(torch.utils.data.IterableDataset):
     """Packs audio frames from WDS sequences into fixed-size batches.
 
     Args:
-        shard_urls: glob/brace pattern or list of tar paths.
+        source: shard dataset directory (e.g. ``data/sharded_wds/<slug>/train``) containing 
+            ``*.tar`` files. Also accepts a native WebDataset brace pattern like
+            ``path/to/dataset-{000000..000054}.tar``.
         batch_frames: number of audio frames per yielded batch.
         shuffle_buffer: number of WDS samples to shuffle over (0 = no shuffle).
         resampled: if True, shards are sampled with replacement (infinite stream,
@@ -65,25 +59,34 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
             batch are discarded. Set False for single-pass evaluation, where
             dropping up to ``batch_frames - 1`` frames would silently shrink the
             split; the final batch is then smaller than ``batch_frames``.
+        eval_mode: if True, ignore the three arguments above and score the split
+            exactly once, in shard order: no shard shuffle, no sample buffer, no
+            resampling, and every trailing frame kept. This is the only
+            configuration whose metrics are comparable between runs.
     """
 
     def __init__(
         self,
-        shard_urls,
+        source,
         *,
         batch_frames: int = 2048,
         shuffle_buffer: int = 1000,
         resampled: bool = True,
         use_kv: bool = False,
         drop_last: bool = True,
+        eval_mode: bool = False,
     ):
         super().__init__()
-        self.shard_urls = shard_urls
+        self.source = source
+        self.shard_urls = _resolve_shard_urls(source)
         self.batch_frames = batch_frames
-        self.shuffle_buffer = shuffle_buffer
-        self.resampled = resampled
         self.use_kv = use_kv
-        self.drop_last = drop_last
+        self.eval_mode = eval_mode
+        # A single clean pass; the shuffle/resample/drop_last arguments are
+        # whatever the caller asked for only outside eval_mode.
+        self.shuffle_buffer = 0 if eval_mode else shuffle_buffer
+        self.resampled = False if eval_mode else resampled
+        self.drop_last = False if eval_mode else drop_last
 
     def __iter__(self) -> Iterator[dict]:
         pipeline = _wds_pipeline(
@@ -167,24 +170,26 @@ class FramePackingIterableDataset(torch.utils.data.IterableDataset):
 
 
 def make_dataloader(
-    shard_urls,
+    source,
     *,
     batch_frames: int = 2048,
     shuffle_buffer: int = 1000,
     resampled: bool = True,
     use_kv: bool = False,
     drop_last: bool = True,
+    eval_mode: bool = False,
     num_workers: int = 4,
     pin_memory: bool = True,
 ) -> torch.utils.data.DataLoader:
     """Convenience wrapper: returns a DataLoader ready for accelerate.prepare()."""
     dataset = FramePackingIterableDataset(
-        shard_urls,
+        source,
         batch_frames=batch_frames,
         shuffle_buffer=shuffle_buffer,
         resampled=resampled,
         use_kv=use_kv,
         drop_last=drop_last,
+        eval_mode=eval_mode,
     )
     return torch.utils.data.DataLoader(
         dataset,
@@ -193,3 +198,43 @@ def make_dataloader(
         pin_memory=pin_memory,
         prefetch_factor=2 if num_workers > 0 else None,
     )
+
+
+def _resolve_shard_urls(source) -> str | list[str]:
+    """Normalize ``source`` into something ``wds.WebDataset`` accepts.
+
+    A directory (``data/sharded_wds/<slug>/train``) becomes the sorted list of
+    ``*.tar`` files it holds; anything else — a brace/glob pattern, a single tar
+    path, or an explicit list — is passed through untouched.
+    """
+    if not isinstance(source, (str, os.PathLike)):
+        return list(source)
+
+    path = Path(source)
+    if not path.is_dir():
+        return str(source)
+
+    shards = sorted(str(p) for p in path.glob("*.tar"))
+    if not shards:
+        raise FileNotFoundError(f"no .tar shards under {path}")
+    return shards
+
+
+def _decode_npy(data: bytes) -> np.ndarray:
+    return np.load(io.BytesIO(data))
+
+
+def _wds_pipeline(shard_urls: str | list[str], *, shuffle_buffer: int, resampled: bool):
+    """Build a webdataset pipeline that yields raw sample dicts.
+
+    Accepts either a list of *.tar file paths or a native WebDataset brace pattern like
+    ``path/to/dataset-{000000..000054}.tar``.
+    """
+    import webdataset as wds
+
+    shardshuffle = 100 if shuffle_buffer > 0 else False
+    dataset = wds.WebDataset(shard_urls, resampled=resampled, shardshuffle=shardshuffle)
+    if shuffle_buffer > 0:
+        dataset = dataset.shuffle(shuffle_buffer)
+    return dataset
+

@@ -136,7 +136,7 @@ def test_rope_permutation_is_an_involution_on_head_layout():
 
 
 @pytest.mark.expensive
-@pytest.mark.skipif(not FEATURIZED.exists(), reason="run dataprep.prepare for miso row 0 first")
+@pytest.mark.skipif(not FEATURIZED.exists(), reason="run dataprep.pipeline for miso row 0 first")
 def test_checkpoint_parity_segment0():
     """Ported decoder must reproduce the golden per-codebook NLL for cb 1..31."""
     import json

@@ -224,6 +224,7 @@ class MisoFeaturizer:
             hiddens=hiddens[0].cpu().float(),
             spans=list(sequence.spans),
             layout=sequence.layout,
+            padding=sequence.padding,
         )
 
 
@@ -235,10 +236,21 @@ class MisoTokenizer:
         audio_codec: MisoAudioCodec | None = None,
         text_tokenizer: Any | None = None,
         featurizer: MisoFeaturizer | None = None,
+        *,
+        bucket_frames: int = 0,
     ):
         self.audio_codec = audio_codec or MisoAudioCodec()
         self.text_tokenizer = _load_text_tokenizer(text_tokenizer)
         self.featurizer = featurizer or MisoFeaturizer()
+
+        self.bucket_frames = bucket_frames
+
+    def bucket_length(self, length: int) -> int:
+        """Round ``length`` up to the next bucket, or return it unchanged."""
+        if self.bucket_frames <= 0:
+            return length
+        blocks = -(-length // self.bucket_frames)  # ceil
+        return blocks * self.bucket_frames
 
     def apply_chat_template(
         self,
@@ -322,15 +334,31 @@ class MisoTokenizer:
 
         if not blocks:
             raise ValueError("At least one segment is required")
+        tokens = torch.cat(blocks, dim=0)
+        mask = torch.cat(masks, dim=0)
+
+        unpadded_length = int(tokens.shape[0])
+        padded_length = self.bucket_length(unpadded_length)
+        if padded_length > self.max_seq_length:
+            raise ValueError(
+                f"Bucket seq with padding {unpadded_length} -> {padded_length} exceeds Miso "
+                f"limit {self.max_seq_length}"
+            )
+        padding = padded_length - unpadded_length
+        if padding:
+            tokens = torch.cat(
+                [tokens, torch.zeros(padding, channels, dtype=tokens.dtype)], dim=0
+            )
+            mask = torch.cat(
+                [mask, torch.zeros(padding, channels, dtype=mask.dtype)], dim=0
+            )
+
         result = TokenizedSequence(
-            tokens=torch.cat(blocks, dim=0),
-            mask=torch.cat(masks, dim=0),
+            tokens=tokens,
+            mask=mask,
             spans=spans,
             layout=layout,
+            padding=padding,
         )
         result.validate()
-        if result.length > self.max_seq_length:
-            raise ValueError(
-                f"Sequence length {result.length} exceeds Miso limit {self.max_seq_length}"
-            )
         return result

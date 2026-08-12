@@ -14,8 +14,9 @@ Pipeline: **dataprep** (tokenize + teacher-forced featurize) → **experiments**
 dflash-voice/
 ├── dataprep/              tokenize + featurize pipeline
 │   ├── common.py            shared dataclasses (Segment, TokenizedSequence, FeaturizedSequence, ...)
-│   ├── prepare.py            CLI entrypoint (python -m dataprep.prepare)
-│   ├── export_wds.py          writes WebDataset shards from featurized data
+│   ├── cli.py                CLI entrypoint (python -m dataprep.cli <prepare|inspect>)
+│   ├── pipeline.py            tokenize + featurize compute stages
+│   ├── shards.py              streams sequences into WebDataset shards
 │   ├── expresso.py            dataset loader (only one wired up)
 │   ├── miso.py / qwen3.py / fish.py   per-model tokenize/featurize backends
 │   └── tests/
@@ -37,7 +38,7 @@ Data flows left to right: `dataprep/` (raw → tokenized → featurized, under `
 
 ### data/ layout
 
-Populated by `dataprep.prepare` (raw/tokenized/featurized/metrics) and `dataprep.export_wds`. Rows are indexed by integer position in the source dataset; each model gets its own subtree under `MODEL/`.
+Populated by `dataprep.cli`: `inspect` writes the per-row raw/tokenized/featurized trees, `prepare` streams straight to `sharded_wds/`. Rows are indexed by integer position in the source dataset; each model gets its own subtree under `MODEL/`.
 
 ```text
 data/
@@ -58,7 +59,7 @@ data/
 │   └── metrics/MODEL/ROW/           written by experiments/expresso_nll_entropy/model_metrics.py
 │       ├── MODEL_metrics.npz
 │       └── MODEL_metrics.json
-└── sharded_wds/RUN_NAME/           written by dataprep/export_wds.py, e.g. sharded_wds/expresso-rows60/
+└── sharded_wds/SLUG/               written by dataprep/shards.py, e.g. sharded_wds/expresso-rows60/
     ├── dataset_info.json
     ├── shards.json
     ├── train/MODEL_train_NNNNN.tar
@@ -83,8 +84,10 @@ Requires Apple Silicon (MLX) for anything touching `mlx_decode` or the MLX datap
 ## Commands
 
 ```bash
-# dataprep: tokenize + featurize a model against Expresso, from repo root
-python -m dataprep.prepare --model <miso|qwen3|fish> --stage <tokenize|featurize|all> [--debug [N]]
+# dataprep: stream Expresso into WebDataset shards, from repo root
+python -m dataprep.cli prepare --model <miso|qwen3|fish> [--rows N] [--slug NAME]
+# per-row intermediates on disk instead, for inspection (a few rows only)
+python -m dataprep.cli inspect --model <miso|qwen3|fish> --rows 3 [--stage <tokenize|featurize>]
 
 # MLX inference benchmark
 python mlx_decode/bench.py --model <qwen3|fish|miso>
@@ -105,10 +108,11 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 
 ## Architecture
 
-**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `raw (audio + transcript) --tokenize--> tokenized --featurize--> featurized`. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
+**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `raw (audio + transcript) --tokenize--> tokenized --featurize--> featurized --shard--> wds shards`. `cli.py` is the entrypoint, `pipeline.py` the compute stages, `shards.py` the WebDataset writers — `prepare` streams rows straight into shards (deterministic sample order, flat memory), `inspect` writes per-row intermediates for a handful of rows. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for rows actually written and `skip_rows` can drop a row cheaply. Train/val is assigned by hashing the row id so a row's sequences never straddle the split. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
 - `Segment` — one speaker turn, metadata only.
 - `TokenizedSequence` — model-ready `(L, C+1)` tokens/mask + `TokenizedSequenceLayout` (per-model geometry) + spans (`SpanKind`: text/audio/special).
 - `FeaturizedSequence` — teacher-forced `{logits, hiddens}`, length `L-1`; index `i` predicts `tokens[i+1]`. For audio span `[s, e)`, predictions live at `[s-1, e-1)` — use `feature_slice_for_targets` rather than reimplementing the offset.
+- `ShardSample` — one sequence serialized to `.npy` bytes for a WebDataset shard.
 - `audio_frame_metrics`/`nll_summary` score a featurized sequence into `semantic`/`audio`/`total` NLL (nats/frame, kbit/s).
 
 **mlx_decode/** — vendored/ported MLX TTS inference loop (from `mlx-audio` 0.4.4) as single-file modules per model, reusing its weights/`nn.Module`s but reimplementing prompt construction, autoregression, and codec decode so timing breaks down per step.

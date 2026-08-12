@@ -28,7 +28,9 @@ from typing import Optional
 import torch
 import typer
 
-DEFAULT_DATA_ROOT = Path("data")
+DEFAULT_DATASET_ROOT = Path("data") / "sharded_wds"
+# Shard sets live in e.g. data/sharded_wds/<slug>/
+DEFAULT_SHARD_SLUG = "expresso-full-logits-bucketed-0804"
 DEFAULT_CHECKPOINT = Path("tmp/miso_depth_decoder.safetensors")
 DEFAULT_FRAME_RATE = 12.5
 NATS_TO_BITS = 1.0 / math.log(2.0)
@@ -39,26 +41,31 @@ app = typer.Typer(
 )
 
 
-def default_shard_urls(
-    split: str, *, data_root: Path = DEFAULT_DATA_ROOT, model: str = "miso"
-) -> str:
-    """Brace-expanded URL covering every shard of ``split``."""
-    shard_dir = data_root / "expresso" / "wds" / model / split
-    shards = sorted(shard_dir.glob(f"{model}_{split}_*.tar"))
-    if not shards:
-        raise typer.BadParameter(f"no shards under {shard_dir}; run dataprep.export_wds first")
-    if len(shards) == 1:
-        return str(shards[0])
-    lo = shards[0].stem.rsplit("_", 1)[1]
-    hi = shards[-1].stem.rsplit("_", 1)[1]
-    return str(shard_dir / f"{model}_{split}_{{{lo}..{hi}}}.tar")
+def default_split_dir(
+    split: str,
+    *,
+    data_root: Path = DEFAULT_DATASET_ROOT,
+    slug: str = DEFAULT_SHARD_SLUG,
+) -> Path:
+    """Split directory for ``slug``; the dataset expands the shards itself."""
+    shard_dir = data_root / slug / split
+    if not shard_dir.is_dir() or not any(shard_dir.glob("*.tar")):
+        raise typer.BadParameter(
+            f"no shards under {shard_dir}; run 'python -m dataprep.cli prepare' "
+            f"or pass --slug for a different shard set"
+        )
+    return shard_dir
 
 
 def expected_frames(
-    split: str, *, data_root: Path = DEFAULT_DATA_ROOT, model: str = "miso"
+    split: str,
+    *,
+    data_root: Path = DEFAULT_DATASET_ROOT,
+    model: str = "miso",
+    slug: str = DEFAULT_SHARD_SLUG,
 ) -> int | None:
     """Frame count for ``split`` from dataset_info.json, for the progress bar."""
-    info = data_root / "expresso" / "wds" / model / "dataset_info.json"
+    info = data_root / slug / "dataset_info.json"
     if not info.exists():
         return None
     try:
@@ -114,7 +121,7 @@ def load_model(checkpoint: Path | None, *, seed: int = 0, device=None):
 
 def evaluate_nll(
     *,
-    shard_urls,
+    source,
     checkpoint: Path | None = None,
     batch_frames: int = 2048,
     device: str | None = None,
@@ -140,11 +147,9 @@ def evaluate_nll(
     tqdm.write(f"params     : {params / 1e6:.1f}M")
 
     dataset = FramePackingIterableDataset(
-        shard_urls,
+        source,
         batch_frames=batch_frames,
-        shuffle_buffer=0,
-        resampled=False,
-        drop_last=False,  # single pass: keep every val frame
+        eval_mode=True,  # single pass, shard order, keep every val frame
     )
 
     totals = torch.zeros(model.config.num_residual_levels, dtype=torch.float64)
@@ -237,8 +242,11 @@ def eval_command(
     checkpoint: Optional[Path] = typer.Option(
         None, help="converted checkpoint; omit for random init"
     ),
-    data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
-    shard_urls: Optional[str] = typer.Option(None, help="override the shard pattern"),
+    data_root: Path = typer.Option(DEFAULT_DATASET_ROOT, help="dataset root"),
+    slug: str = typer.Option(DEFAULT_SHARD_SLUG, help="shard set under dataset root"),
+    shards: Optional[str] = typer.Option(
+        None, "--shards", help="override with a split directory or shard pattern"
+    ),
     batch_frames: int = typer.Option(2048, help="frames per batch"),
     device: Optional[str] = typer.Option(None, help="cpu / mps / cuda (default: auto)"),
     max_batches: Optional[int] = typer.Option(None, help="stop early, for smoke tests"),
@@ -250,18 +258,20 @@ def eval_command(
     if checkpoint is not None and not checkpoint.exists():
         raise typer.BadParameter(f"{checkpoint} not found; run 'convert' first")
 
-    urls = shard_urls or default_shard_urls(split, data_root=data_root)
+    source = shards or default_split_dir(split, data_root=data_root, slug=slug)
     typer.echo(f"split      : {split}")
-    typer.echo(f"shards     : {urls}")
+    typer.echo(f"shards     : {source}")
 
     result = evaluate_nll(
-        shard_urls=urls,
+        source=source,
         checkpoint=checkpoint,
         batch_frames=batch_frames,
         device=device,
         max_batches=max_batches,
         seed=seed,
-        total_frames=None if max_batches else expected_frames(split, data_root=data_root),
+        total_frames=None
+        if max_batches
+        else expected_frames(split, data_root=data_root, slug=slug),
         progress=not quiet,
     )
 

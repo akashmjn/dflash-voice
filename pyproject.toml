@@ -30,7 +30,7 @@ mlx_decode = [
 train = [
     "transformers==5.6.0",
     "torch>=2.2.0",
-    "webdataset>=0.2.100",
+    "webdataset==1.0.2",
     "accelerate>=0.30.0",
     "numpy",
     "tqdm",

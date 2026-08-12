@@ -1,7 +1,7 @@
 import pytest
 
 from dataprep.common import SpanKind, TokenizedSequenceLayout
-from dataprep.prepare import load_tokenizer
+from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import tokenize_segment
 
 

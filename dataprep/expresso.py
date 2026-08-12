@@ -19,12 +19,42 @@ DATASET_NAME = "expresso"
 
 @dataclass(frozen=True)
 class RawExample:
+    """One dataset row. ``audio`` is None unless the loader decoded it.
+
+    Loaders that decode return :class:`DecodedExample` instead.
+    """
+
     row: int
     audio_path: Path
     transcript_path: Path
     sample_rate: int
     num_channels: int
     segments: list[dict[str, Any]]
+    audio: np.ndarray | None = None
+
+    def require_audio(self) -> np.ndarray:
+        """The decoded audio, or a ValueError naming the row that lacks it."""
+        if self.audio is None:
+            raise ValueError(
+                f"row {self.row} carries no decoded audio; it came from a "
+                "metadata-only loader such as download_expresso"
+            )
+        return self.audio
+
+
+@dataclass(frozen=True)
+class DecodedExample(RawExample):
+    """A :class:`RawExample` whose ``audio`` is always present.
+
+    Annotate a parameter with this type to require decoded audio.
+    """
+
+    # Defaulted only because the base field is; __post_init__ enforces it.
+    audio: np.ndarray = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.audio is None:
+            raise ValueError(f"DecodedExample for row {self.row} requires audio")
 
 
 def _parse_segments(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -100,6 +130,73 @@ def _iter_selected_rows(dataset: str, split: str, rows: set[int]):
             return
 
 
+def _validate_segments(
+    row_index: int, segments: list[dict[str, Any]], audio: np.ndarray, sample_rate: int
+) -> None:
+    """Reject segments referencing a missing channel or timings past the audio."""
+    duration = audio.shape[1] / sample_rate
+    for segment in segments:
+        if segment["channel"] >= audio.shape[0]:
+            raise ValueError(
+                f"Row {row_index} segment {segment['segment_id']} references channel "
+                f"{segment['channel']} but audio has {audio.shape[0]} channels"
+            )
+        if segment["start"] < 0 or segment["end"] > duration + 1 / sample_rate:
+            raise ValueError(
+                f"Row {row_index} segment timing falls outside {duration:.3f}s audio"
+            )
+
+
+def stream_expresso(
+    *,
+    dataset: str = DEFAULT_DATASET,
+    split: str = DEFAULT_SPLIT,
+    limit: int | None = None,
+) -> Iterable[DecodedExample]:
+    """Yield decoded rows straight from the hub, never touching disk.
+
+    The disk-backed path (``download_expresso`` + ``load_raw_example``) writes a
+    wav and a transcript per row, which is what ``inspect`` wants and what the
+    full dataset cannot afford. This is the same data without the round trip.
+
+    Rows arrive in dataset order. ``IterableDataset.shuffle`` would also
+    shuffle shard *order* and prefetch from several of the 36 audio files at
+    once, stalling the first row for minutes; the sequence-level reservoir in
+    ``dataprep.shards.shuffle_stream`` breaks up per-row correlation for far
+    less. Row ids are stream positions, which is what keeps the train/val hash
+    split deterministic.
+    """
+    from datasets import Audio, load_dataset
+
+    stream = load_dataset(dataset, split=split, streaming=True)
+    if stream.features is not None:
+        for name, feature in stream.features.items():
+            if isinstance(feature, Audio):
+                stream = stream.cast_column(name, Audio(decode=False))
+
+    # Tag each row with its dataset-order id; the hash split depends on that id.
+    stream = stream.map(lambda _row, idx: {"__row_index__": idx}, with_indices=True)
+    if limit is not None:
+        stream = stream.take(limit)
+
+    for candidate in stream:
+        row = dict(candidate)
+        row_index = int(row.pop("__row_index__"))
+        audio, sample_rate = _decode_audio(row)
+        segments = _parse_segments(row)
+        _validate_segments(row_index, segments, audio, sample_rate)
+        yield DecodedExample(
+            row=row_index,
+            # No files on disk in this path; the loaders only read `segments`.
+            audio_path=Path(),
+            transcript_path=Path(),
+            sample_rate=sample_rate,
+            num_channels=int(audio.shape[0]),
+            segments=segments,
+            audio=audio,
+        )
+
+
 def expresso_row_count(
     dataset: str = DEFAULT_DATASET, split: str = DEFAULT_SPLIT
 ) -> int:
@@ -122,6 +219,10 @@ def download_expresso(
     dataset: str = DEFAULT_DATASET,
     split: str = DEFAULT_SPLIT,
 ) -> list[RawExample]:
+    """Write rows to ``root``, returning metadata-only handles.
+
+    The audio lands at ``audio_path``; :func:`load_raw_example` reads it back.
+    """
     import soundfile as sf
 
     selected = set(rows)
@@ -133,17 +234,8 @@ def download_expresso(
     for row_index, row in _iter_selected_rows(dataset, split, selected):
         audio, sample_rate = _decode_audio(row)
         segments = _parse_segments(row)
+        _validate_segments(row_index, segments, audio, sample_rate)
         duration = audio.shape[1] / sample_rate
-        for segment in segments:
-            if segment["channel"] >= audio.shape[0]:
-                raise ValueError(
-                    f"Row {row_index} segment {segment['segment_id']} references channel "
-                    f"{segment['channel']} but audio has {audio.shape[0]} channels"
-                )
-            if segment["start"] < 0 or segment["end"] > duration + 1 / sample_rate:
-                raise ValueError(
-                    f"Row {row_index} segment timing falls outside {duration:.3f}s audio"
-                )
 
         row_dir = root / str(row_index)
         row_dir.mkdir(parents=True, exist_ok=True)
@@ -182,7 +274,8 @@ def download_expresso(
     return sorted(results, key=lambda example: example.row)
 
 
-def load_raw_example(row_dir: str | Path) -> tuple[RawExample, np.ndarray]:
+def load_raw_example(row_dir: str | Path) -> DecodedExample:
+    """Read a row that ``download_expresso`` wrote, decoding its wav."""
     import soundfile as sf
 
     row_dir = Path(row_dir)
@@ -191,14 +284,12 @@ def load_raw_example(row_dir: str | Path) -> tuple[RawExample, np.ndarray]:
     audio_path = row_dir / "audio.wav"
     audio, sample_rate = sf.read(audio_path, dtype="float32", always_2d=True)
     audio = audio.T
-    return (
-        RawExample(
-            row=int(payload["row"]),
-            audio_path=audio_path,
-            transcript_path=transcript_path,
-            sample_rate=int(sample_rate),
-            num_channels=int(audio.shape[0]),
-            segments=list(payload["segments"]),
-        ),
-        audio,
+    return DecodedExample(
+        row=int(payload["row"]),
+        audio_path=audio_path,
+        transcript_path=transcript_path,
+        sample_rate=int(sample_rate),
+        num_channels=int(audio.shape[0]),
+        segments=list(payload["segments"]),
+        audio=audio,
     )

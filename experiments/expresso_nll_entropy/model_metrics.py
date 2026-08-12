@@ -158,7 +158,7 @@ def compute_row_metrics(
     if not (feature_dir / "metadata.json").exists():
         raise FileNotFoundError(
             f"Missing featurized row {feature_dir}; run "
-            f"`python -m dataprep.prepare --model {model} --stage featurize` first"
+            f"`python -m dataprep.cli prepare --model {model} --stage featurize` first"
         )
     sequences, metadata = FeaturizedSequence.load_all(feature_dir)
     if not sequences:

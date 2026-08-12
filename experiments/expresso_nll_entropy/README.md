@@ -45,7 +45,7 @@ Run from the repo root:
 
 ```bash
 uv pip install -e ".[dataprep-mlx]"
-python -m dataprep.prepare --model <miso|qwen3|fish> --stage all --rows 10
+python -m dataprep.cli inspect --model <miso|qwen3|fish> --rows 10
 ```
 
 **2. Compute metrics** - converts logits into (NLL, entropy) per frame and codebook, writes to `data/DATASET/metrics/MODEL/ROW/MODEL_metrics.{npz,json}`:

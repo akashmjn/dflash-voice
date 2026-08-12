@@ -12,7 +12,7 @@ def _entropy(logits):
 
 @pytest.mark.expensive
 def test_miso_entropy_matches_fixture(segment0, miso_entropy_reference):
-    from dataprep.prepare import load_tokenizer
+    from dataprep.pipeline import load_tokenizer
 
     expected = miso_entropy_reference["segment"]
     tokenizer = load_tokenizer("miso")

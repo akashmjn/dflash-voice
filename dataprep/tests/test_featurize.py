@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from dataprep.common import SpanKind, audio_frame_metrics, nll_summary
-from dataprep.prepare import load_tokenizer
+from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import tokenize_segment
 
 

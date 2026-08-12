@@ -8,6 +8,7 @@ Pipeline objects are intentionally small and self-describing:
   that position ``i`` is the model state after consuming ``tokens[i]``
   (predicting ``tokens[i+1]``). Use spans to select regions; no separate
   ``audio_positions`` list.
+- ``ShardSample`` — one sequence serialized for a WebDataset shard.
 """
 
 from __future__ import annotations
@@ -221,19 +222,30 @@ def _as_torch_tree(value: Any):
 class TokenizedSequence:
     """Model-ready stack of ``tokens`` (integer array) shaped ``(L, num_codebooks + 1)``.
 
-    Contains text tokens (+1), and semantic + audio codec tokens arranged a model-specific 
+    Contains text tokens (+1), and semantic + audio codec tokens in a model-specific
     arrangement described by ``layout``. ``spans`` demarcates contiguous regions of the
     token sequence (e.g. text, audio, ...) for interpretation by the consumer.
+
+    ``padding`` counts trailing frames appended to reach a bucket size, so
+    ``length`` is the padded height and ``unpadded_length`` the real content.
+    ``spans`` always cover real frames only, so consumers that slice by span never see it
     """
 
     tokens: Any
     mask: Any
     spans: list[TokenSequenceSpan]
     layout: TokenizedSequenceLayout
+    padding: int = 0
 
     @property
     def length(self) -> int:
+        """Padded height of ``tokens`` (== ``unpadded_length`` when unpadded)."""
         return int(self.tokens.shape[0])
+
+    @property
+    def unpadded_length(self) -> int:
+        """Real length, ignoring bucket padding."""
+        return self.length - self.padding
 
     def validate(self) -> None:
         """Check ``(L, C+1)`` layout and that mask/token channels agree."""
@@ -264,6 +276,16 @@ class TokenizedSequence:
                 "Text-channel tokens must be zero where the text mask is inactive"
             )
 
+        if self.padding:
+            if not 0 < self.padding < self.length:
+                raise ValueError(
+                    f"padding {self.padding} outside (0, {self.length})"
+                )
+            if np.any(tokens[self.unpadded_length :] != 0):
+                raise ValueError("Padded frames must have zero tokens")
+            if np.any(mask[self.unpadded_length :]):
+                raise ValueError("Padded frames must have an all-False mask")
+
         for span in self.spans:
             if not 0 <= span.start < span.end <= self.length:
                 raise ValueError(f"Invalid sequence span {span}")
@@ -271,6 +293,18 @@ class TokenizedSequence:
     def spans_of(self, kind: SpanKind | str) -> list[TokenSequenceSpan]:
         kind = SpanKind(kind)
         return [span for span in self.spans if span.kind == kind]
+
+    @property
+    def seq_id(self) -> int:
+        """Stable id: the segment's index in the source row, not its list position.
+        """
+        segment_ids = {span.segment_id for span in self.spans}
+        if len(segment_ids) != 1:
+            raise ValueError(
+                f"seq_id is ambiguous across {sorted(segment_ids)}; "
+                "packed multi-segment sequences need an explicit id"
+            )
+        return segment_ids.pop()
 
     @staticmethod
     def save_all(
@@ -361,6 +395,8 @@ class FeaturizedSequence:
 
     For example, given a span of audio tokens ``[s, e)`` in the tokenized sequence,
     corresponding features predicting it are ``[s - 1, e - 1)`` in featurized sequence.
+
+    When the source sequence is bucket-padded, input/output alignment remains the same.
     """
 
     logits: dict[int, Any]
@@ -368,11 +404,17 @@ class FeaturizedSequence:
     spans: list[TokenSequenceSpan]
     layout: TokenizedSequenceLayout
     kv_cache: Any | None = None
+    padding: int = 0
 
     @property
     def length(self) -> int:
-        """Feature length ``L - 1``."""
+        """Feature length ``L - 1``, including any bucket padding."""
         return int(self.hiddens.shape[0])
+
+    @property
+    def unpadded_length(self) -> int:
+        """Feature length excluding bucket padding."""
+        return self.length - self.padding
 
     def feature_layout(self) -> TokenizedSequenceLayout:
         """Source layout with the model's hidden/logit widths filled in."""
@@ -511,6 +553,77 @@ class FeaturizedSequence:
             item.validate()
             sequences.append(item)
         return sequences, metadata
+
+
+@dataclass
+class ShardSample:
+    """One sequence as it is stored in a WebDataset shard.
+
+    The arrays are kept as encoded ``.npy`` bytes rather than live tensors: the
+    exporter holds a shuffle buffer of these, and fp16 bytes are far smaller than
+    the fp32 tensors they came from. ``to_wds`` renders the wire format
+    ``webdataset.TarWriter`` expects -- a flat dict of ``{key}.{ext}`` -- so the
+    field-per-part shape stays in Python and only the boundary deals in dicts.
+    """
+
+    row: int
+    seq_id: int
+    source_dataset_id: int
+    segment_id: int
+    audio_frames: int
+    frame_rate: float
+    model: str
+    hidden_dim: int
+    num_codebooks: int
+    hiddens: bytes
+    targets: bytes
+    #: Teacher per-head logits; present only when the run asked for them.
+    logits: bytes | None = None
+    vocab_size: int | None = None
+    #: Which token column each head is scored against. A consumer needs it to
+    #: reproduce :func:`audio_frame_metrics`.
+    head_targets: list[int] | None = None
+    #: Per-layer KV slices over the audio span, when the model exposed a cache.
+    kv: bytes | None = None
+
+    @property
+    def key(self) -> str:
+        """WDS sample key. ``(row, seq_id)`` is the identity a resumed run skips on."""
+        return f"{self.row:08d}_{self.seq_id:05d}"
+
+    def meta(self) -> dict:
+        """Provenance written as ``{key}.meta.json``."""
+        meta = {
+            "row": self.row,
+            "seq_id": self.seq_id,
+            "source_dataset_id": self.source_dataset_id,
+            "segment_id": self.segment_id,
+            "audio_frames": self.audio_frames,
+            "frame_rate": self.frame_rate,
+            "model": self.model,
+            "hidden_dim": self.hidden_dim,
+            "num_codebooks": self.num_codebooks,
+            "has_kv": self.kv is not None,
+            "has_logits": self.logits is not None,
+        }
+        if self.logits is not None:
+            meta["vocab_size"] = self.vocab_size
+            meta["head_targets"] = list(self.head_targets or [])
+        return meta
+
+    def to_wds(self) -> dict:
+        """Flatten to the ``{key}.{ext}`` dict ``webdataset.TarWriter`` writes."""
+        sample = {
+            "__key__": self.key,
+            "hiddens.npy": self.hiddens,
+            "targets.npy": self.targets,
+            "meta.json": json.dumps(self.meta()).encode(),
+        }
+        if self.logits is not None:
+            sample["logits.npy"] = self.logits
+        if self.kv is not None:
+            sample["kv.npy"] = self.kv
+        return sample
 
 
 def audio_frame_metrics(

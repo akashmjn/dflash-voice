@@ -7,9 +7,16 @@ import pytest
 import soundfile as sf
 
 from dataprep.common import Segment
-from dataprep.prepare import slice_segment_codes
+from dataprep.pipeline import slice_segment_codes
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "segment0"
+
+
+@pytest.fixture(scope="session")
+def monkeypatch_session():
+    """Session-scoped monkeypatch; the built-in fixture is function-scoped."""
+    with pytest.MonkeyPatch.context() as patcher:
+        yield patcher
 
 
 @pytest.fixture(scope="session")

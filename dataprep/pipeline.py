@@ -1,10 +1,19 @@
+"""Tokenize and featurize dataset rows: the two compute stages of dataprep.
+
+Two paths over the same stages. ``prepare_row``/``featurize_row`` read and write
+per-row directories under ``data/`` for inspection; ``stream_prepared_samples``
+runs the same work over a stream of decoded rows and yields shard-ready samples,
+touching no disk. ``dataprep.shards.shard_prepare`` drives the latter.
+
+Library module: the command line lives in ``dataprep.cli``.
+"""
+
 from __future__ import annotations
 
-import argparse
 import json
 import traceback
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 
 import torch
 from tqdm import tqdm
@@ -12,14 +21,14 @@ from tqdm import tqdm
 from dataprep.common import (
     FeaturizedSequence,
     Segment,
+    ShardSample,
     TokenizedSequence,
     _as_torch,
 )
 from dataprep.expresso import (
     DATASET_NAME,
     DEFAULT_DATASET,
-    download_expresso,
-    expresso_row_count,
+    DecodedExample,
     load_raw_example,
 )
 
@@ -48,14 +57,31 @@ def log_failure(log_root: Path, *, stage: str, row: int, exc: BaseException) -> 
         handle.write(json.dumps(record) + "\n")
 
 
-def load_tokenizer(model: str, model_id: str | None = None, device: str | None = None):
+def load_tokenizer(
+    model: str,
+    model_id: str | None = None,
+    device: str | None = None,
+    *,
+    bucket_frames: int = 0,
+):
+    """Build a tokenizer backend.
+
+    ``bucket_frames`` pads sequences up to a multiple, which bounds the number of 
+    the shapes seen by featurizer calls. Workaround to avoid unbounded memory growth 
+    of ~+50MiB per new length upto 60GB+ on Pytorch MPS backend.
+        https://github.com/pytorch/pytorch/issues/181213
+        https://github.com/pytorch/pytorch/pull/181485
+    """
     if model == "miso":
         from dataprep.miso import MisoAudioCodec, MisoFeaturizer, MisoTokenizer
 
         return MisoTokenizer(
             audio_codec=MisoAudioCodec(device=device),
             featurizer=MisoFeaturizer(device=device),
+            bucket_frames=bucket_frames,
         )
+    if bucket_frames:
+        raise ValueError(f"{model!r} does not support bucket_frames")
     if model == "qwen3":
         from dataprep.qwen3 import Qwen3Tokenizer
 
@@ -153,6 +179,114 @@ def build_sequences(
     return sequences
 
 
+def tokenize_example(
+    example,
+    audio,
+    *,
+    tokenizer,
+    log_root: Path = DEFAULT_LOG_ROOT,
+    pack_segments: bool = False,
+) -> tuple[list[TokenizedSequence], list]:
+    """Encode a raw example's audio and build its tokenized sequences.
+
+    Returns ``(sequences, channel_codes)``. Shared by the disk-backed and
+    streaming paths so both number speakers and slice codes identically.
+    """
+    row = example.row
+    channel_codes = [
+        tokenizer.audio_codec.encode(audio[channel], example.sample_rate)
+        for channel in tqdm(
+            range(example.num_channels), desc=f"row {row} encode", unit="ch", leave=False
+        )
+    ]
+
+    segments = [
+        Segment.from_transcript_item(raw, source_dataset_id=row)
+        for raw in example.segments
+    ]
+    # Number the speakers 0, 1, ... in order of first appearance in the row, so
+    # the id is the small turn-taking index Miso's text prefix expects.
+    speaker_ids: dict[str, int] = {}
+    for segment in segments:
+        segment.speaker_id = speaker_ids.setdefault(segment.speaker, len(speaker_ids))
+
+    sequences = build_sequences(
+        segments,
+        tokenizer,
+        audio_codes=slice_segment_codes(
+            segments, channel_codes, frame_rate=tokenizer.audio_codec.frame_rate
+        ),
+        row=row,
+        log_root=log_root,
+        pack_segments=pack_segments,
+    )
+    return sequences, channel_codes
+
+
+def stream_prepared_samples(
+    examples: Iterable[DecodedExample],
+    *,
+    model: str,
+    tokenizer,
+    log_root: Path | None = None,
+    pack_segments: bool = False,
+    include_kv: bool = False,
+    include_logits: bool = False,
+    skip_rows: set[int] | None = None,
+) -> Iterator[ShardSample]:
+    """Tokenize + featurize raw examples, yielding WDS samples, nothing on disk.
+
+    Lazy: a sample costs its forward pass only when pulled. Rows in
+    ``skip_rows`` are dropped before tokenize, so skipping one is free.
+
+    Failed rows are logged to ``failures.jsonl`` and skipped -- one bad row
+    should not abort a multi-hour pass.
+    """
+    from dataprep.shards import build_sample
+
+    log_root = DEFAULT_LOG_ROOT if log_root is None else log_root
+    frame_rate = float(tokenizer.audio_codec.frame_rate)
+    for example in examples:
+        row = example.row
+        if skip_rows and row in skip_rows:
+            continue
+        audio = example.audio
+        try:
+            sequences, _ = tokenize_example(
+                example,
+                audio,
+                tokenizer=tokenizer,
+                log_root=log_root,
+                pack_segments=pack_segments,
+            )
+        except Exception as exc:
+            log_failure(log_root, stage="tokenize", row=row, exc=exc)
+            continue
+
+        for sequence in tqdm(
+            sequences, desc=f"row {row} featurize", unit="seq", leave=False
+        ):
+            seq_id = sequence.seq_id
+            try:
+                feature = tokenizer.featurizer.featurize(sequence, include_kv=include_kv)
+                feature.validate(sequence_length=sequence.length)
+                sample = build_sample(
+                    sequence,
+                    feature,
+                    row=row,
+                    seq_id=seq_id,
+                    model=model,
+                    frame_rate=frame_rate,
+                    include_kv=include_kv,
+                    include_logits=include_logits,
+                )
+            except Exception as exc:
+                log_failure(log_root, stage="featurize", row=row, exc=exc)
+                continue
+            if sample is not None:
+                yield sample
+
+
 def prepare_row(
     row_dir: str | Path,
     *,
@@ -163,7 +297,8 @@ def prepare_row(
     pack_segments: bool = False,
     log_root: Path = DEFAULT_LOG_ROOT,
 ) -> Path:
-    example, audio = load_raw_example(row_dir)
+    example = load_raw_example(row_dir)
+    audio = example.audio
     row = example.row
     row_dir = Path(row_dir)
     tqdm.write(
@@ -171,45 +306,22 @@ def prepare_row(
         f"{len(example.segments)} segment(s)"
     )
 
-    channel_codes = [
-        tokenizer.audio_codec.encode(audio[channel], example.sample_rate)
-        for channel in tqdm(
-            range(example.num_channels),
-            desc=f"row {row} encode",
-            unit="ch",
-            leave=False,
-        )
-    ]
-    codebooks = row_dir / f"{model}_codebooks.pt"
+    sequences, channel_codes = tokenize_example(
+        example,
+        audio,
+        tokenizer=tokenizer,
+        log_root=log_root,
+        pack_segments=pack_segments,
+    )
+    # The per-row codec dump is an inspection artifact; the streaming path skips it.
     save_codebooks(
-        codebooks,
+        row_dir / f"{model}_codebooks.pt",
         channel_codes,
         sample_rate=tokenizer.audio_codec.sample_rate,
         frame_rate=tokenizer.audio_codec.frame_rate,
         num_codebooks=tokenizer.audio_codec.num_codebooks,
     )
 
-    segments = [
-        Segment.from_transcript_item(raw, source_dataset_id=example.row)
-        for raw in example.segments
-    ]
-    # Number the speakers 0, 1, ... in order of first appearance in the row, so
-    # the id is the small turn-taking index Miso's text prefix expects.
-    speaker_ids: dict[str, int] = {}
-    for segment in segments:
-        segment.speaker_id = speaker_ids.setdefault(segment.speaker, len(speaker_ids))
-    sequences = build_sequences(
-        segments,
-        tokenizer,
-        audio_codes=slice_segment_codes(
-            segments,
-            channel_codes,
-            frame_rate=tokenizer.audio_codec.frame_rate,
-        ),
-        row=row,
-        log_root=log_root,
-        pack_segments=pack_segments,
-    )
     output_dir = Path(output_root) / dataset / "tokenized" / model / str(row)
     TokenizedSequence.save_all(
         output_dir,
@@ -266,104 +378,7 @@ def featurize_row(
     return feature_dir
 
 
-def resolve_rows(*, debug: int | None) -> list[int]:
-    """Rows to process: the first ``debug`` rows, or the whole dataset by default."""
-    if debug is None:
-        return list(range(expresso_row_count()))
-    if debug < 1:
-        raise ValueError("--debug requires a positive row count")
-    return list(range(debug))
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Prepare Expresso codebooks and flat TTS sequences."
+if __name__ == "__main__":  # pragma: no cover - moved to dataprep.cli
+    raise SystemExit(
+        "dataprep.pipeline is a library module; run 'python -m dataprep.cli --help'"
     )
-    parser.add_argument("--model", choices=("miso", "qwen3", "fish"), required=True)
-    parser.add_argument(
-        "--stage",
-        choices=("tokenize", "featurize", "all"),
-        default="tokenize",
-    )
-    parser.add_argument(
-        "--debug",
-        nargs="?",
-        const=3,
-        type=int,
-        default=None,
-        metavar="N",
-        help="Prepare only the first N Expresso rows (N defaults to 3 when the "
-        "flag is given without a value). Omit to process the entire dataset.",
-    )
-    parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
-    parser.add_argument(
-        "--dataset",
-        default=DATASET_NAME,
-        help=f"Dataset slug for the on-disk artifact directory (default: {DATASET_NAME}).",
-    )
-    parser.add_argument(
-        "--log-root",
-        type=Path,
-        default=DEFAULT_LOG_ROOT,
-        help=f"Directory for failure logs (default: {DEFAULT_LOG_ROOT}).",
-    )
-    parser.add_argument("--model-id", default=None)
-    parser.add_argument("--device", default=None)
-    parser.add_argument(
-        "--dump-kv",
-        action="store_true",
-        help="Save the slow-AR layer KV cache during featurization.",
-    )
-    parser.add_argument(
-        "--pack-segments",
-        action="store_true",
-        help="Pack consecutive segments up to the model limit.",
-    )
-    args = parser.parse_args()
-
-    rows = resolve_rows(debug=args.debug)
-    raw_root = args.data_root / args.dataset / "raw"
-    missing = [
-        row
-        for row in rows
-        if not (raw_root / str(row) / "transcript_segments.json").exists()
-    ]
-    if missing:
-        download_expresso(missing, root=raw_root)
-
-    tokenizer = load_tokenizer(
-        args.model, model_id=args.model_id, device=args.device
-    )
-    paths: list[Path] = []
-    if args.stage in ("tokenize", "all"):
-        for row in tqdm(rows, desc=f"Tokenizing {args.model}", unit="row"):
-            paths.append(
-                prepare_row(
-                    raw_root / str(row),
-                    model=args.model,
-                    tokenizer=tokenizer,
-                    output_root=args.data_root,
-                    dataset=args.dataset,
-                    pack_segments=args.pack_segments,
-                    log_root=args.log_root,
-                )
-            )
-    if args.stage in ("featurize", "all"):
-        for row in tqdm(rows, desc=f"Featurizing {args.model}", unit="row"):
-            paths.append(
-                featurize_row(
-                    row,
-                    model=args.model,
-                    featurizer=tokenizer.featurizer,
-                    data_root=args.data_root,
-                    dataset=args.dataset,
-                    dump_kv=args.dump_kv,
-                    log_root=args.log_root,
-                )
-            )
-    for path in paths:
-        print(path)
-
-
-if __name__ == "__main__":
-    main()
