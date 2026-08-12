@@ -44,7 +44,7 @@ Run from the repo root:
 **1. Dataprep** — tokenize dataset rows + featurize into (hiddens, logits) with model forward pass, writes to `data/DATASET/featurized/MODEL/ROW/`:
 
 ```bash
-uv pip install -e ".[dataprep]"
+uv pip install -e ".[dataprep-mlx]"
 python -m dataprep.prepare --model <miso|qwen3|fish> --stage all --rows 10
 ```
 
@@ -60,5 +60,5 @@ python model_metrics.py summarize --rows 10
 **3. Explore** — view entropy visualizations in the `marimo` notebook for a given model/dataset example:
 
 ```bash
-marimo edit notebooks/metrics_explore.py
+marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 ```
