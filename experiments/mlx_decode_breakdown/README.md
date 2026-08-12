@@ -1,10 +1,10 @@
-# MLX decoding time breakdown
+# MLX Inference breakdown
 
-Per-codec-frame timing breakdown of MLX TTS inference across Qwen3, Fish, and Miso 8-bit checkpoints — backbone (semantic codes) vs depth decoder (RVQ audio codes) generation, plus codec decode. Every model generates one codec frame per autoregressive step, so timings are reported per step. The depth decoder generating RVQ audio codes dominates the per-frame cost (orange bars below).
+We measure per-codec-frame decode times of OSS TTS models ranging from 1.7B (Qwen3) to 8B (CSM/Miso) parameters. This is broken down by LLM backbone (semantic codes), and depth decoder (RVQ audio codes).
 
-![TTS MLX benchmark aggregate](assets/benchmark-per-frame.png)
+We see that overhead from repeated forward passes of 100-300M param RVQ audio decoders takes up more than 50% of inference time, inspite of heavier LLM backbones (1.7B - 8B).
 
-Results below are pooled over 6 prompts per model, from `mlx_decode/output/*/metrics.json`:
+![MLX decode breakdown](assets/mlx-decode-breakdown.png)
 
 | Model            | Native  | Backbone (semantic codes) | Depth (audio codes) | Depth % | Depth iters | ms / depth iter | Total ms | Codec frames/s | Gen RTF | Wall RTF |
 | ---------------- | ------- | ------------------------- | ------------------- | ------- | ----------- | --------------- | -------- | -------------- | ------- | -------- |
@@ -13,10 +13,7 @@ Results below are pooled over 6 prompts per model, from `mlx_decode/output/*/met
 | Fish S2 Pro 8bit | 21 Hz   | 22.9 ms                   | 21.2 ms             | 48%     | 9           | 2.36 ms         | 44.1 ms  | 22.7           | 0.93    | 1.13     |
 | MisoTTS 8bit     | 12.5 Hz | 36.7 ms                   | 92.4 ms             | 72%     | 31          | 2.98 ms         | 129.1 ms | 7.7            | 1.61    | 1.80     |
 
-6 prompts per model, 8-bit MLX checkpoints, Apple Silicon. **RTF** = time / audio duration (&lt;1 faster than realtime, &gt;1 slower). **Gen RTF** = native Hz / codec frames/s; **Wall RTF** = end-to-end including codec decode (`mean_rtf`).
-
-Real-time budgets: Qwen3 / Miso @ 12.5 Hz → 80 ms/frame; Fish @ 21 Hz → 47.6 ms/frame.
-
+6 prompts per model, 8-bit MLX checkpoints, on M1 Max Apple Silicon. **RTF** = time / audio duration (&lt;1 faster than realtime, &gt;1 slower). **Gen RTF** = native Hz / codec frames/s; **Wall RTF** = end-to-end including codec decode (`mean_rtf`).
 
 ## Reproduce
 
