@@ -116,6 +116,23 @@ class MisoAudioCodec:
         return torch.cat(frames, dim=-1).squeeze(0).squeeze(0)
 
 
+def _channel_mask(sequence: TokenizedSequence) -> torch.Tensor:
+    """``(L, C+1)`` bool grid gating which columns feed the summed frame embedding.
+
+    Text frames contribute the text column, audio frames the codebooks. Goes by
+    span kind, not token value: an EOS_AUDIO frame is all zeros, the same as the
+    grid's fill. Frames no span covers, i.e. bucket padding, stay dead.
+    """
+    layout = sequence.layout
+    mask = torch.zeros(sequence.length, layout.num_channels, dtype=torch.bool)
+    for span in sequence.spans:
+        if span.kind.value.endswith("text"):
+            mask[span.start : span.end, layout.text_column] = True
+        else:
+            mask[span.start : span.end, list(layout.audio_channels)] = True
+    return mask
+
+
 class MisoFeaturizer:
     """Teacher-force MisoTTS without enabling its inference KV caches."""
 
@@ -151,7 +168,7 @@ class MisoFeaturizer:
         num_codebooks = self.num_codebooks
 
         tokens = torch.as_tensor(sequence.tokens, dtype=torch.long)
-        mask = torch.as_tensor(sequence.mask, dtype=torch.bool)
+        mask = _channel_mask(sequence)
         audio_channels = torch.tensor(sequence.layout.audio_channels)
 
         # tokens[L-1] is never an input, so features cover tokens[0..L-2].
@@ -260,7 +277,6 @@ class MisoTokenizer:
     ) -> TokenizedSequence:
         audio_codes = audio_codes or {}
         blocks = []
-        masks = []
         spans: list[TokenSequenceSpan] = []
         position = 0
         channels = self.audio_codec.num_codebooks + 1
@@ -276,10 +292,7 @@ class MisoTokenizer:
             )
             text = torch.zeros(len(text_ids), channels, dtype=torch.long)
             text[:, -1] = torch.tensor(text_ids, dtype=torch.long)
-            text_mask = torch.zeros_like(text, dtype=torch.bool)
-            text_mask[:, -1] = True
             blocks.append(text)
-            masks.append(text_mask)
             spans.append(
                 TokenSequenceSpan(
                     source_dataset_id=segment.source_dataset_id,
@@ -301,10 +314,7 @@ class MisoTokenizer:
                     )
                 audio = torch.zeros(codes.shape[0], channels, dtype=torch.long)
                 audio[:, :-1] = codes
-                audio_mask = torch.zeros_like(audio, dtype=torch.bool)
-                audio_mask[:, :-1] = True
                 blocks.append(audio)
-                masks.append(audio_mask)
                 spans.append(
                     TokenSequenceSpan(
                         source_dataset_id=segment.source_dataset_id,
@@ -319,10 +329,7 @@ class MisoTokenizer:
                 # All-zero tokens, same as the grid's "no token here" fill --
                 # the EOS_AUDIO span is what marks this as a real stop frame.
                 eos = torch.zeros(1, channels, dtype=torch.long)
-                eos_mask = torch.zeros_like(eos, dtype=torch.bool)
-                eos_mask[:, :-1] = True
                 blocks.append(eos)
-                masks.append(eos_mask)
                 spans.append(
                     TokenSequenceSpan(
                         source_dataset_id=segment.source_dataset_id,
@@ -337,7 +344,6 @@ class MisoTokenizer:
         if not blocks:
             raise ValueError("At least one segment is required")
         tokens = torch.cat(blocks, dim=0)
-        mask = torch.cat(masks, dim=0)
 
         unpadded_length = int(tokens.shape[0])
         padded_length = self.bucket_length(unpadded_length)
@@ -351,13 +357,9 @@ class MisoTokenizer:
             tokens = torch.cat(
                 [tokens, torch.zeros(padding, channels, dtype=tokens.dtype)], dim=0
             )
-            mask = torch.cat(
-                [mask, torch.zeros(padding, channels, dtype=mask.dtype)], dim=0
-            )
 
         result = TokenizedSequence(
             tokens=tokens,
-            mask=mask,
             spans=spans,
             layout=layout,
             padding=padding,

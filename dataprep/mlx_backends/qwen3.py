@@ -333,7 +333,6 @@ class Qwen3Tokenizer:
         mx = _mx()
         audio_codes = audio_codes or {}
         blocks = []
-        masks = []
         spans: list[TokenSequenceSpan] = []
         position = 0
         channels = self.audio_codec.num_codebooks + 1
@@ -347,10 +346,7 @@ class Qwen3Tokenizer:
             text_ids = list(self.text_tokenizer.encode(chat))
             text = mx.zeros((len(text_ids), channels), dtype=mx.int32)
             text[:, -1] = mx.array(text_ids, dtype=mx.int32)
-            text_mask = mx.zeros(text.shape, dtype=mx.bool_)
-            text_mask[:, -1] = True
             blocks.append(text)
-            masks.append(text_mask)
             spans.append(
                 TokenSequenceSpan(
                     source_dataset_id=segment.source_dataset_id,
@@ -367,10 +363,7 @@ class Qwen3Tokenizer:
                 prefix_ids = self._codec_prefix()
                 prefix = mx.zeros((len(prefix_ids), channels), dtype=mx.int32)
                 prefix[:, 0] = mx.array(prefix_ids, dtype=mx.int32)
-                prefix_mask = mx.zeros(prefix.shape, dtype=mx.bool_)
-                prefix_mask[:, 0] = True
                 blocks.append(prefix)
-                masks.append(prefix_mask)
                 spans.append(
                     TokenSequenceSpan(
                         source_dataset_id=segment.source_dataset_id,
@@ -389,10 +382,7 @@ class Qwen3Tokenizer:
                     )
                 audio = mx.zeros((codes.shape[0], channels), dtype=mx.int32)
                 audio[:, :-1] = codes
-                audio_mask = mx.zeros(audio.shape, dtype=mx.bool_)
-                audio_mask[:, :-1] = True
                 blocks.append(audio)
-                masks.append(audio_mask)
                 spans.append(
                     TokenSequenceSpan(
                         source_dataset_id=segment.source_dataset_id,
@@ -406,10 +396,7 @@ class Qwen3Tokenizer:
 
                 eos = mx.zeros((1, channels), dtype=mx.int32)
                 eos[0, 0] = config.codec_eos_token_id
-                eos_mask = mx.zeros(eos.shape, dtype=mx.bool_)
-                eos_mask[:, :-1] = True
                 blocks.append(eos)
-                masks.append(eos_mask)
                 spans.append(
                     TokenSequenceSpan(
                         source_dataset_id=segment.source_dataset_id,
@@ -425,7 +412,6 @@ class Qwen3Tokenizer:
             raise ValueError("At least one segment is required")
         result = TokenizedSequence(
             tokens=mx.concatenate(blocks, axis=0),
-            mask=mx.concatenate(masks, axis=0),
             spans=spans,
             layout=layout,
         )

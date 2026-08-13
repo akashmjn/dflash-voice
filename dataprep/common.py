@@ -3,7 +3,7 @@
 Pipeline objects are intentionally small and self-describing:
 
 - ``Segment`` — transcript metadata only (no tensors)
-- ``TokenizedSequence`` — model-ready ``(L, C+1)`` tokens/mask + spans/layout
+- ``TokenizedSequence`` — model-ready ``(L, C+1)`` tokens + spans/layout
 - ``FeaturizedSequence`` — teacher-forced outputs of length ``L-1``, indexed so
   that position ``i`` is the model state after consuming ``tokens[i]``
   (predicting ``tokens[i+1]``). Use spans to select regions; no separate
@@ -247,10 +247,13 @@ class TokenizedSequence:
     ``padding`` counts trailing frames appended to reach a bucket size, so
     ``length`` is the padded height and ``unpadded_length`` the real content.
     ``spans`` always cover real frames only, so consumers that slice by span never see it
+
+    Spans are the only record of which columns of a frame carry a real token --
+    a zero is equally a genuine id or the grid's fill. Backends needing a
+    per-channel mask derive one from spans and ``layout``; none is stored.
     """
 
     tokens: Any
-    mask: Any
     spans: list[TokenSequenceSpan]
     layout: TokenizedSequenceLayout
     padding: int = 0
@@ -285,8 +288,6 @@ class TokenizedSequence:
                 f"Expected {expected_channels} sequence channels for "
                 f"{self.layout.num_codebooks} codebooks, got {tokens.shape[1]}"
             )
-        if self.mask is not None and _as_numpy(self.mask).shape != tokens.shape:
-            raise ValueError("Sequence mask must have the same shape as tokens")
 
         if self.padding:
             if not 0 < self.padding < self.length:
@@ -360,7 +361,7 @@ class TokenizedSequence:
         *,
         metadata: dict[str, Any],
     ) -> Path:
-        """Write ``sequences.pt`` (tokens+masks) and ``metadata.json`` (spans/layout).
+        """Write ``sequences.pt`` (tokens) and ``metadata.json`` (spans/layout).
 
         ``layout`` is written once at the top level; it is constant for a model.
         """
@@ -373,13 +374,7 @@ class TokenizedSequence:
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(
-            [
-                {
-                    "tokens": _as_torch(item.tokens).long(),
-                    "mask": _as_torch(item.mask).bool(),
-                }
-                for item in sequences
-            ],
+            [{"tokens": _as_torch(item.tokens).long()} for item in sequences],
             directory / "sequences.pt",
         )
         # Drop legacy split artifacts from earlier dataprep layouts.
@@ -423,7 +418,6 @@ class TokenizedSequence:
             ]
             sequence = TokenizedSequence(
                 tokens=row["tokens"],
-                mask=row["mask"],
                 spans=spans,
                 layout=layout,
             )

@@ -37,9 +37,5 @@
   "tokens_shape": [
     582,
     11
-  ],
-  "mask_shape": [
-    582,
-    11
   ]
 }

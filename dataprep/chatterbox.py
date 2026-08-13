@@ -383,7 +383,6 @@ class ChatterboxTokenizer:
         )
         length = COND_PREFIX_LEN + n_text + n_speech
         tokens = torch.zeros(length, channels, dtype=torch.long)
-        mask = torch.zeros(length, channels, dtype=torch.bool)
         spans: list[TokenSequenceSpan] = []
 
         def add_span(start: int, end: int, kind: TokenSpanKind) -> None:
@@ -405,46 +404,36 @@ class ChatterboxTokenizer:
         add_span(0, position, TokenSpanKind.PREFIX)
 
         tokens[position, -1] = self.hp.start_text_token
-        mask[position, -1] = True
         add_span(position, position + 1, TokenSpanKind.BOS_TEXT)
         position += 1
 
         tokens[position : position + len(text_ids), -1] = torch.tensor(
             text_ids, dtype=torch.long
         )
-        mask[position : position + len(text_ids), -1] = True
         add_span(position, position + len(text_ids), TokenSpanKind.TEXT)
         position += len(text_ids)
 
-        # EOT is id 0, the same value the grid uses for "nothing here". It is a
-        # real supervised target, so the mask is True and only the mask tells the
-        # two apart -- leave the zero token alone. EOS_TEXT is what makes it
-        # findable without going by value.
-        mask[position, -1] = True
+        # EOT is id 0, the same value the grid uses for "nothing here", so the
+        # token stays zero and the EOS_TEXT span is what marks it a real target.
         add_span(position, position + 1, TokenSpanKind.EOS_TEXT)
         position += 1
 
         tokens[position, 0] = self.hp.start_speech_token
-        mask[position, 0] = True
         add_span(position, position + 1, TokenSpanKind.BOS_AUDIO)
         position += 1
 
         tokens[position : position + frames, 0] = speech_ids
-        mask[position : position + frames, 0] = True
         add_span(position, position + frames, TokenSpanKind.AUDIO)
         position += frames
 
         tokens[position, 0] = self.hp.stop_speech_token
-        mask[position, 0] = True
         add_span(position, position + 1, TokenSpanKind.EOS_AUDIO)
         position += 1
 
         if position != length:
             raise AssertionError(f"Built {position} frames, expected {length}")
 
-        result = TokenizedSequence(
-            tokens=tokens, mask=mask, spans=spans, layout=layout
-        )
+        result = TokenizedSequence(tokens=tokens, spans=spans, layout=layout)
         result.validate(self.span_token_ranges)
         return result
 

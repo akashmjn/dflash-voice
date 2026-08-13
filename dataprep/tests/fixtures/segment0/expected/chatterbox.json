@@ -823,10 +823,6 @@
     793,
     2
   ],
-  "mask_shape": [
-    793,
-    2
-  ],
   "n_samples_16k": 380160,
   "duration_sec": 23.76
 }

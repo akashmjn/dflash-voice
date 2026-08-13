@@ -80,7 +80,7 @@ and on-disk format.
 | `Segment`                       | One speaker turn — transcript metadata only.                                                       |
 | `TokenSpanKind`, `TokenSequenceSpan` | Region kind (`text` / `audio` / `special`) and its `[start, end)` range.                           |
 | `TokenizedSequenceLayout`       | Per-model geometry: channel map, which token column each head scores against, hidden/logit widths. |
-| `TokenizedSequence`             | Model-ready `(L, C+1)` tokens/mask, plus layout and spans.                                         |
+| `TokenizedSequence`             | Model-ready `(L, C+1)` tokens, plus layout and spans. Spans are the only record of which columns are live.       |
 | `FeaturizedSequence`            | Teacher-forced `{logits, hiddens}` of length `L-1`; index `i` predicts `tokens[i+1]`.              |
 | `ShardSample`                   | One sequence serialized to `.npy` bytes, ready for a WebDataset shard.                             |
 
@@ -100,7 +100,7 @@ kbit/s.
 data/DATASET/                 # e.g. data/expresso/ — override with --dataset
   raw/ROW/                    # audio.wav (channel-first), transcript_segments.json,
                               # MODEL_codebooks.pt (temporary per-model codec dump)
-  tokenized/MODEL/ROW/        # sequences.pt — ragged list[{tokens, mask}] of (L, C+1)
+  tokenized/MODEL/ROW/        # sequences.pt — ragged list[{tokens}] of (L, C+1)
                               # metadata.json — row layout + per-sequence length/spans
   featurized/MODEL/ROW/       # features.pt — ragged list[{logits, hiddens}] of length L-1
                               # metadata.json, kv_context.pt (only with --dump-kv)

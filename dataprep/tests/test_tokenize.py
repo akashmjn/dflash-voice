@@ -1,8 +1,44 @@
 import pytest
+import torch
 
-from dataprep.common import TokenSpanKind, TokenizedSequenceLayout
+from dataprep.common import (
+    TokenSequenceSpan,
+    TokenSpanKind,
+    TokenizedSequence,
+    TokenizedSequenceLayout,
+)
+from dataprep.miso import _channel_mask
 from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import tokenize_segment
+
+
+def test_miso_channel_mask_follows_spans():
+    """EOS_AUDIO is the case worth pinning: all zeros, so only its span kind
+    distinguishes it from the bucket padding that must stay dead.
+    """
+    layout = TokenizedSequenceLayout(num_codebooks=2, text_channel=-1)
+    spans = [
+        (0, 3, TokenSpanKind.TEXT),
+        (3, 5, TokenSpanKind.AUDIO),
+        (5, 6, TokenSpanKind.EOS_AUDIO),
+    ]
+    sequence = TokenizedSequence(
+        tokens=torch.zeros(8, 3, dtype=torch.long),
+        spans=[
+            TokenSequenceSpan(
+                source_dataset_id=0, segment_id=0, start=start, end=end, kind=kind
+            )
+            for start, end, kind in spans
+        ],
+        layout=layout,
+        padding=2,
+    )
+    sequence.validate()
+
+    expected = torch.zeros(8, 3, dtype=torch.bool)
+    expected[0:3, -1] = True  # text frames: text column only
+    expected[3:6, :-1] = True  # audio + EOS_AUDIO: codebooks only
+    assert torch.equal(_channel_mask(sequence), expected)
 
 
 @pytest.mark.parametrize(
@@ -32,7 +68,6 @@ def test_tokenize_segment0(segment0, model, expected_tokenized):
         tuple(span) for span in expected["spans"]
     ]
     assert list(sequence.tokens.shape) == expected["tokens_shape"]
-    assert list(sequence.mask.shape) == expected["mask_shape"]
 
     audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]
     assert audio_span.end - audio_span.start == expected["audio_frames"]
@@ -58,7 +93,6 @@ def test_tokenize_segment0_chatterbox(segment0, expected_tokenized):
         tuple(span) for span in expected["spans"]
     ]
     assert list(sequence.tokens.shape) == expected["tokens_shape"]
-    assert list(sequence.mask.shape) == expected["mask_shape"]
 
     text_span = sequence.spans_of(TokenSpanKind.TEXT)[0]
     audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]

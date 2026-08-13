@@ -51,7 +51,7 @@ data/
 │   │   ├── transcript_segments.json
 │   │   └── MODEL_codebooks.pt        temporary per-model codec dump, (F, C) per channel
 │   ├── tokenized/MODEL/ROW/
-│   │   ├── sequences.pt             ragged list[{tokens, mask}] shaped (L, C+1)
+│   │   ├── sequences.pt             ragged list[{tokens}] shaped (L, C+1)
 │   │   └── metadata.json             layout for the row + per-sequence length/spans
 │   ├── featurized/MODEL/ROW/
 │   │   ├── features.pt              ragged list[{logits, hiddens}] of length L-1
@@ -117,7 +117,7 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 (MLX-only, unverified, warn on use, skipped by default in tests) and should not constrain pipeline
 changes. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for rows actually written and `skip_rows` can drop a row cheaply. Train/val is assigned by hashing the row id so a row's sequences never straddle the split. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
 - `Segment` — one speaker turn, metadata only.
-- `TokenizedSequence` — model-ready `(L, C+1)` tokens/mask + `TokenizedSequenceLayout` (per-model geometry) + spans (`SpanKind`: text/audio/special).
+- `TokenizedSequence` — model-ready `(L, C+1)` tokens + `TokenizedSequenceLayout` (per-model geometry) + spans (`SpanKind`: text/audio/special). Spans are the source of truth for which columns hold a real token — no mask is stored; backends needing one derive it (see `dataprep/miso.py::_channel_mask`).
 - `FeaturizedSequence` — teacher-forced `{logits, hiddens}`, length `L-1`; index `i` predicts `tokens[i+1]`. For audio span `[s, e)`, predictions live at `[s-1, e-1)` — use `feature_slice_for_targets` rather than reimplementing the offset.
 - `ShardSample` — one sequence serialized to `.npy` bytes for a WebDataset shard.
 - `audio_frame_metrics`/`nll_summary` score a featurized sequence into `semantic`/`audio`/`total` NLL (nats/frame, kbit/s).

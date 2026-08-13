@@ -141,8 +141,14 @@ class FishFeaturizer:
         tokens = mx.array(sequence.tokens, dtype=mx.int32)
         sequence.validate()
 
-        audio_mask = np.asarray(sequence.mask)[:, 1:].any(axis=1)
-        audio_positions = np.flatnonzero(audio_mask)
+        # Frames the AUDIO spans cover; Fish scores only those.
+        audio_positions = np.concatenate(
+            [
+                np.arange(span.start, span.end)
+                for span in sequence.spans_of(TokenSpanKind.AUDIO)
+            ]
+            or [np.zeros(0, dtype=int)]
+        )
         if audio_positions.size == 0:
             raise ValueError("Fish sequence contains no audio frames")
         if audio_positions[0] == 0:
@@ -190,7 +196,7 @@ class FishFeaturizer:
             semantic_targets <= config.semantic_end_token_id
         )
         if not bool(mx.all(valid_semantic).item()):
-            raise ValueError("Fish audio mask includes a non-semantic target token")
+            raise ValueError("Fish AUDIO span includes a non-semantic target token")
 
         return FeaturizedSequence(
             logits=logits,
@@ -274,7 +280,6 @@ class FishTokenizer:
         mx = _mx()
         audio_codes = audio_codes or {}
         encoded = []
-        masks = []
         spans: list[TokenSequenceSpan] = []
         position = 0
         tokenizer = self._model.tokenizer
@@ -293,23 +298,12 @@ class FishTokenizer:
                 raise ValueError("Fish supervised segments require audio_codes")
             tokens_cf = self._encode_segment(segment, codes)
             tokens = mx.transpose(tokens_cf, (1, 0))
-            audio_positions = (tokens[:, 0] >= tokenizer.semantic_begin_id) & (
+            is_audio = (tokens[:, 0] >= tokenizer.semantic_begin_id) & (
                 tokens[:, 0] <= tokenizer.semantic_end_id
             )
-            mask = mx.concatenate(
-                [
-                    mx.ones((tokens.shape[0], 1), dtype=mx.bool_),
-                    mx.broadcast_to(
-                        audio_positions[:, None],
-                        (tokens.shape[0], self.audio_codec.num_codebooks),
-                    ),
-                ],
-                axis=1,
-            )
             encoded.append(tokens)
-            masks.append(mask)
 
-            audio_flags = np.asarray(audio_positions, dtype=bool)
+            audio_flags = np.asarray(is_audio, dtype=bool)
             # Non-audio frames are chat/control framing around the VQ block.
             spans.extend(
                 _contiguous_spans(
@@ -339,7 +333,6 @@ class FishTokenizer:
         spans.sort(key=lambda span: span.start)
         result = TokenizedSequence(
             tokens=mx.concatenate(encoded, axis=0),
-            mask=mx.concatenate(masks, axis=0),
             spans=spans,
             layout=layout,
         )
