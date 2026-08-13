@@ -1,3 +1,11 @@
+"""Qwen3-TTS tokenize/featurize backend. DEPRECATED -- see README.md.
+
+Unmaintained and MLX-only. Known correctness gap: codebook 0 scores NLL 4.01
+nats against a predictive entropy of 0.97, so `test_featurize.py` excludes this
+backend from its confidently-wrong assertion. Treat its NLL/entropy output as
+indicative only. The maintained backend is ``dataprep.miso``.
+"""
+
 from __future__ import annotations
 
 from math import gcd

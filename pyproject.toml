@@ -61,7 +61,8 @@ dataprep-mlx = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-m 'not expensive'"
+addopts = "-m 'not expensive and not deprecated'"
 markers = [
     "expensive: loads full models for dataprep featurization or entropy checks",
+    "deprecated: covers the unmaintained MLX dataprep backends (qwen3 / fish); see dataprep/mlx_backends/README.md",
 ]

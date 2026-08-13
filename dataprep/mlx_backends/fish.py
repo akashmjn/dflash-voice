@@ -1,3 +1,10 @@
+"""Fish S2 tokenize/featurize backend. DEPRECATED -- see README.md.
+
+Unmaintained and MLX-only. Never audited for the codebook-0 scoring bug that
+affects the sibling qwen3 backend, so treat its NLL/entropy output as indicative
+only. The maintained backend is ``dataprep.miso``.
+"""
+
 from __future__ import annotations
 
 from math import gcd

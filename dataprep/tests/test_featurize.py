@@ -12,8 +12,9 @@ from dataprep.tests.conftest import tokenize_segment
     "model",
     [
         pytest.param("miso", marks=pytest.mark.expensive),
-        "qwen3",
-        "fish",
+        # Deprecated MLX backends: skipped by default, run with -m deprecated.
+        pytest.param("qwen3", marks=pytest.mark.deprecated),
+        pytest.param("fish", marks=pytest.mark.deprecated),
     ],
 )
 def test_featurize_segment0(segment0, model, expected_featurized):
@@ -58,8 +59,10 @@ def test_featurize_segment0(segment0, model, expected_featurized):
     # bug in the forward pass (e.g. leaking future context)
     excess = codebook_nll - codebook_entropy
     if model == "miso":
-        # TODO: qwen3 cb0 currently trips this (NLL 4.01 vs entropy 0.97). Audit
-        # the qwen3/fish featurizers for the same class of bug, then drop the guard.
+        # Only miso is held to this. qwen3 cb0 trips it (NLL 4.01 vs entropy 0.97)
+        # and fish was never audited for the same class of bug -- both are
+        # deprecated and unmaintained, so the gap is recorded rather than chased.
+        # See dataprep/mlx_backends/README.md.
         assert excess.max() < 1.0, (
             f"codebook {int(excess.argmax())} is confidently wrong: NLL "
             f"{codebook_nll[excess.argmax()]:.3f} exceeds entropy "

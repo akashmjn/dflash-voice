@@ -20,6 +20,12 @@ Models are validated on ground truth tokenized (text, audio) sequences to comput
 | `qwen3` | 16        | 12.5            | 8.31                | 5.81                          | 0.150           |  1.571       | **1.721**    |
 | `miso`  | 32        | 12.5            | 1.79                | 4.29                          | 0.032           |  2.397       | **2.429**    |
 
+> [!NOTE]
+> The `fish` and `qwen3` rows come from dataprep backends that are now **deprecated and
+> unverified** — qwen3's semantic NLL in particular is suspect (codebook 0 scores well above its
+> predictive entropy, which usually means misaligned targets). Treat both rows as indicative and
+> the `miso` row as the verified one. See [dataprep/mlx_backends](../../dataprep/mlx_backends/README.md).
+
 - NLL is normalized to `kbits/s` computed as  `kbits/s = avg NLL per codebook × num_codebooks x log2(e) × frame_rate / 1000`
 - Computed over a subset of first 10 dataset rows (`--rows 10`) ~4300 seconds by tokenizing, running a forward pass + dumping logits
 - See module [dataprep](../../dataprep/) for more
@@ -46,6 +52,8 @@ Run from the repo root:
 ```bash
 uv pip install -e ".[dataprep-mlx]"
 python -m dataprep.cli inspect --model <miso|qwen3|fish> --rows 10
+# note: the qwen3/fish dataprep backends are now deprecated and unverified —
+# see dataprep/mlx_backends/README.md before rerunning or citing their numbers
 ```
 
 **2. Compute metrics** - converts logits into (NLL, entropy) per frame and codebook, writes to `data/DATASET/metrics/MODEL/ROW/MODEL_metrics.{npz,json}`:

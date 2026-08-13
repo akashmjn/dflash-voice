@@ -50,7 +50,13 @@ from dataprep.pipeline import (
 )
 
 MODELS = ("miso", "qwen3", "fish")
+# MLX-only, unmaintained, and not verified against the current pipeline. Accepted
+# so experiments/expresso_nll_entropy/ stays reproducible; warns on use.
+# See dataprep/mlx_backends/README.md.
+DEPRECATED_MODELS = ("qwen3", "fish")
 STAGES = ("tokenize", "featurize", "all")
+
+MODEL_HELP = "tokenizer backend: miso (maintained); qwen3 / fish (deprecated, MLX-only)"
 
 app = typer.Typer(
     add_completion=False,
@@ -61,11 +67,19 @@ app = typer.Typer(
 def _check_model(model: str) -> None:
     if model not in MODELS:
         raise typer.BadParameter(f"model must be one of {' / '.join(MODELS)}")
+    if model in DEPRECATED_MODELS:
+        typer.secho(
+            f"warning: --model {model} is deprecated and unmaintained (MLX-only, "
+            "not verified against the current pipeline). Output is indicative only. "
+            "See dataprep/mlx_backends/README.md.",
+            fg=typer.colors.YELLOW,
+            err=True,
+        )
 
 
 @app.command("inspect")
 def inspect_command(
-    model: str = typer.Option(..., help=f"tokenizer backend: {' / '.join(MODELS)}"),
+    model: str = typer.Option(..., help=MODEL_HELP),
     rows: int = typer.Option(3, help="number of rows to prepare, from row 0"),
     stage: str = typer.Option("all", help=f"pipeline stage: {' / '.join(STAGES)}"),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
@@ -140,7 +154,7 @@ def inspect_command(
 
 @app.command("prepare")
 def prepare_command(
-    model: str = typer.Option(..., help=f"tokenizer backend: {' / '.join(MODELS)}"),
+    model: str = typer.Option(..., help=MODEL_HELP),
     rows: Optional[int] = typer.Option(
         None, help="cap at the first N streamed rows, for smoke tests"
     ),

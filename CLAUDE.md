@@ -18,7 +18,8 @@ dflash-voice/
 │   ├── pipeline.py            tokenize + featurize compute stages
 │   ├── shards.py              streams sequences into WebDataset shards
 │   ├── expresso.py            dataset loader (only one wired up)
-│   ├── miso.py / qwen3.py / fish.py   per-model tokenize/featurize backends
+│   ├── miso.py                the maintained tokenize/featurize backend
+│   ├── mlx_backends/           DEPRECATED qwen3.py / fish.py (MLX-only, unverified)
 │   └── tests/
 ├── mlx_decode/            ported MLX inference loops per model, for benchmarking
 │   ├── bench.py               benchmark CLI entrypoint
@@ -73,7 +74,7 @@ data/
 `dataprep-miso` pins Transformers 4.49 (via MisoTTS); `dataprep-mlx`/`mlx_decode` pin Transformers 5.6 + huggingface-hub 1.5. Only install one extra per venv.
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"    # Qwen3 / Fish dataprep + MLX inference
+uv pip install -e ".[dataprep-mlx]"    # deprecated Qwen3 / Fish dataprep + MLX inference
 uv pip install -e ".[dataprep-miso]"   # Miso dataprep (needs MisoTTS package)
 uv pip install -e ".[mlx_decode]"      # MLX inference/benchmarking only
 uv pip install -e ".[dev]"             # pytest, modal
@@ -85,17 +86,20 @@ Requires Apple Silicon (MLX) for anything touching `mlx_decode` or the MLX datap
 
 ```bash
 # dataprep: stream Expresso into WebDataset shards, from repo root
-python -m dataprep.cli prepare --model <miso|qwen3|fish> [--rows N] [--slug NAME]
+# (--model qwen3|fish also parse but are deprecated; see dataprep/mlx_backends/README.md)
+python -m dataprep.cli prepare --model miso [--rows N] [--slug NAME]
 # per-row intermediates on disk instead, for inspection (a few rows only)
-python -m dataprep.cli inspect --model <miso|qwen3|fish> --rows 3 [--stage <tokenize|featurize>]
+python -m dataprep.cli inspect --model miso --rows 3 [--stage <tokenize|featurize>]
 
 # MLX inference benchmark
 python mlx_decode/bench.py --model <qwen3|fish|miso>
 
-# tests — `-m 'not expensive'` is the pytest default (skips full-model-loading tests)
+# tests — `-m 'not expensive and not deprecated'` is the pytest default
+# (skips full-model-loading tests and the deprecated qwen3/fish backends)
 pytest -v mlx_decode/tests/test_decode_parity.py
 pytest -v dataprep/tests/
 pytest -v -m expensive dataprep/tests/test_miso_entropy.py
+pytest -v -m deprecated dataprep/tests/       # qwen3/fish MLX backends
 
 # demo: two-speaker podcast render
 python demo/demo_tts_podcast.py render --model miso --max-segments 6
@@ -108,7 +112,9 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 
 ## Architecture
 
-**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `raw (audio + transcript) --tokenize--> tokenized --featurize--> featurized --shard--> wds shards`. `cli.py` is the entrypoint, `pipeline.py` the compute stages, `shards.py` the WebDataset writers — `prepare` streams rows straight into shards (deterministic sample order, flat memory), `inspect` writes per-row intermediates for a handful of rows. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for rows actually written and `skip_rows` can drop a row cheaply. Train/val is assigned by hashing the row id so a row's sequences never straddle the split. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
+**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `raw (audio + transcript) --tokenize--> tokenized --featurize--> featurized --shard--> wds shards`. `cli.py` is the entrypoint, `pipeline.py` the compute stages, `shards.py` the WebDataset writers — `prepare` streams rows straight into shards (deterministic sample order, flat memory), `inspect` writes per-row intermediates for a handful of rows. `miso` is the only maintained backend; `qwen3`/`fish` are deprecated under `dataprep/mlx_backends/`
+(MLX-only, unverified, warn on use, skipped by default in tests) and should not constrain pipeline
+changes. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for rows actually written and `skip_rows` can drop a row cheaply. Train/val is assigned by hashing the row id so a row's sequences never straddle the split. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
 - `Segment` — one speaker turn, metadata only.
 - `TokenizedSequence` — model-ready `(L, C+1)` tokens/mask + `TokenizedSequenceLayout` (per-model geometry) + spans (`SpanKind`: text/audio/special).
 - `FeaturizedSequence` — teacher-forced `{logits, hiddens}`, length `L-1`; index `i` predicts `tokens[i+1]`. For audio span `[s, e)`, predictions live at `[s-1, e-1)` — use `feature_slice_for_targets` rather than reimplementing the offset.

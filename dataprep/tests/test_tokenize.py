@@ -5,7 +5,15 @@ from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import tokenize_segment
 
 
-@pytest.mark.parametrize("model", ["miso", "qwen3", "fish"])
+@pytest.mark.parametrize(
+    "model",
+    [
+        "miso",
+        # Deprecated MLX backends: skipped by default, run with -m deprecated.
+        pytest.param("qwen3", marks=pytest.mark.deprecated),
+        pytest.param("fish", marks=pytest.mark.deprecated),
+    ],
+)
 def test_tokenize_segment0(segment0, model, expected_tokenized):
     expected = expected_tokenized[model]
     sequence = tokenize_segment(segment0, load_tokenizer(model))

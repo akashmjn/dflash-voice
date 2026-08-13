@@ -31,8 +31,13 @@ Shards land in `data/sharded_wds/SLUG/`, named per run (`--slug`, default `DATAS
 shard set is defined by the run that produced it. Overwriting one needs `--force`. Failed rows are
 logged to `failures.jsonl` and skipped, so a multi-hour run does not die on one bad row.
 
-Per-model tokenize/featurize backends are in `miso.py` / `qwen3.py` / `fish.py`; dataset loading in a
-loader like `expresso.py` (the one wired up today). Everything else is dataset-agnostic.
+The maintained tokenize/featurize backend is `miso.py`; dataset loading is in a loader like
+`expresso.py` (the one wired up today). Everything else is dataset-agnostic.
+
+`qwen3` and `fish` live in [`mlx_backends/`](./mlx_backends/README.md) and are **deprecated,
+MLX-only, and unverified** — kept only so `experiments/expresso_nll_entropy/` stays reproducible.
+They warn on use, are skipped by the default test run, and are not expected to survive pipeline
+changes.
 
 ### Notes on the design
 
@@ -115,7 +120,7 @@ MisoTTS pins Transformers 4.49 while the MLX stack pins Transformers 5.6 / `hugg
 these conflict — install only one extra per environment:
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"    # Qwen3 / Fish
+uv pip install -e ".[dataprep-mlx]"    # deprecated Qwen3 / Fish backends
 uv pip install -e ".[dataprep-miso]"   # Miso (replaces the pins above)
 uv pip install -e ../MisoTTS           # to use a locally cloned MisoTTS
 ```

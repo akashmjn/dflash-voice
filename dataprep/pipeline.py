@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import traceback
+import warnings
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Mapping, Sequence
 
@@ -33,7 +34,9 @@ from dataprep.expresso import (
 )
 
 
-DEFAULT_MODELS = {
+# Deprecated MLX-only backends; see dataprep/mlx_backends/README.md. Kept only so
+# the experiments/expresso_nll_entropy/ comparison stays reproducible.
+DEPRECATED_MLX_MODELS = {
     "qwen3": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
     "fish": "mlx-community/fish-audio-s2-pro-8bit",
 }
@@ -66,8 +69,12 @@ def load_tokenizer(
 ):
     """Build a tokenizer backend.
 
-    ``bucket_frames`` pads sequences up to a multiple, which bounds the number of 
-    the shapes seen by featurizer calls. Workaround to avoid unbounded memory growth 
+    ``miso`` is the maintained backend. ``qwen3`` and ``fish`` are deprecated
+    MLX-only backends kept for reproducing ``experiments/expresso_nll_entropy/``;
+    they warn on use -- see ``dataprep/mlx_backends/README.md``.
+
+    ``bucket_frames`` pads sequences up to a multiple, which bounds the number of
+    the shapes seen by featurizer calls. Workaround to avoid unbounded memory growth
     of ~+50MiB per new length upto 60GB+ on Pytorch MPS backend.
         https://github.com/pytorch/pytorch/issues/181213
         https://github.com/pytorch/pytorch/pull/181485
@@ -80,17 +87,25 @@ def load_tokenizer(
             featurizer=MisoFeaturizer(device=device),
             bucket_frames=bucket_frames,
         )
+
+    if model not in DEPRECATED_MLX_MODELS:
+        raise ValueError(f"Unknown model {model!r}")
+
+    # Deprecated MLX-only path. Imports stay inside this branch so nothing here
+    # loads -- or has to keep working -- during a normal pipeline run.
+    from dataprep.mlx_backends import DEPRECATION_NOTE
+
+    warnings.warn(DEPRECATION_NOTE.format(model=model), DeprecationWarning, stacklevel=2)
     if bucket_frames:
         raise ValueError(f"{model!r} does not support bucket_frames")
     if model == "qwen3":
-        from dataprep.qwen3 import Qwen3Tokenizer
+        from dataprep.mlx_backends.qwen3 import Qwen3Tokenizer
 
-        return Qwen3Tokenizer(model_id or DEFAULT_MODELS["qwen3"])
-    if model == "fish":
-        from dataprep.fish import FishTokenizer
+        return Qwen3Tokenizer(model_id or DEPRECATED_MLX_MODELS["qwen3"])
 
-        return FishTokenizer(model_id or DEFAULT_MODELS["fish"])
-    raise ValueError(f"Unknown model {model!r}")
+    from dataprep.mlx_backends.fish import FishTokenizer
+
+    return FishTokenizer(model_id or DEPRECATED_MLX_MODELS["fish"])
 
 
 def save_codebooks(
