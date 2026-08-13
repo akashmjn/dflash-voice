@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from dataprep.common import SpanKind
+from dataprep.common import TokenSpanKind
 from dataprep.tests.conftest import tokenize_segment
 
 
@@ -19,7 +19,7 @@ def test_miso_entropy_matches_fixture(segment0, miso_entropy_reference):
     sequence = tokenize_segment(segment0, tokenizer)
     features = tokenizer.featurizer.featurize(sequence)
 
-    audio_span = sequence.spans_of(SpanKind.AUDIO)[0]
+    audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]
     pred = features.feature_slice_for_targets(audio_span.start, audio_span.end)
     actual = torch.stack(
         [_entropy(features.logits[index][pred]) for index in range(32)],

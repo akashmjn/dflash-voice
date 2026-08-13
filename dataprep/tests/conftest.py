@@ -42,6 +42,12 @@ def segment0():
 
 @pytest.fixture(scope="session")
 def expected_tokenized():
+    """Per-model gold for ``test_tokenize_segment0*``.
+
+    ``chatterbox.json`` is dumped by external script using offical 
+    Chatterbox Flash inference repo. Audio resample is torchaudio not librosa,
+    used by official repo, disagrees on ~6% of S3 token ids on this clip.
+    """
     expected = {}
     for path in (FIXTURE_DIR / "expected").glob("*.json"):
         if path.stem.endswith("_featurize"):
@@ -66,13 +72,25 @@ def miso_entropy_reference():
 
 
 def tokenize_segment(segment0, tokenizer):
+    """Tokenize the one-segment fixture, taking the backend's encode path.
+
+    The fixture audio is exactly that segment, so a ``segmented_encode`` codec
+    encodes it whole rather than slicing frames back out of a channel pass.
+    """
     segment = segment0["segment"]
-    channel_codes = [
-        tokenizer.audio_codec.encode(segment0["audio"], segment0["sample_rate"])
-    ]
-    audio_codes = slice_segment_codes(
-        [segment],
-        channel_codes,
-        frame_rate=tokenizer.audio_codec.frame_rate,
-    )
+    if getattr(tokenizer.audio_codec, "segmented_encode", False):
+        audio_codes = {
+            segment.segment_id: tokenizer.audio_codec.encode(
+                segment0["audio"], segment0["sample_rate"]
+            )
+        }
+    else:
+        channel_codes = [
+            tokenizer.audio_codec.encode(segment0["audio"], segment0["sample_rate"])
+        ]
+        audio_codes = slice_segment_codes(
+            [segment],
+            channel_codes,
+            frame_rate=tokenizer.audio_codec.frame_rate,
+        )
     return tokenizer.apply_chat_template([segment], audio_codes=audio_codes)

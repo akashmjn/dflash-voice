@@ -46,6 +46,14 @@ dataprep-miso = [
     "soundfile",
     "pytest",
 ]
+# Chatterbox AR + Flash tokenize. chatterbox-tts pins transformers==5.2.0 and
+# torch 2.6, so this is a third mutually-exclusive environment -- install it alone.
+dataprep-chatterbox = [
+    "chatterbox-tts==0.1.7",
+    "soundfile",
+    "librosa",
+    "pytest",
+]
 dataprep-mlx = [
     "mlx>=0.31.1",
     "mlx-lm==0.31.1",

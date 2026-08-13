@@ -78,7 +78,7 @@ and on-disk format.
 | Record                          | What it holds                                                                                      |
 | ------------------------------- | -------------------------------------------------------------------------------------------------- |
 | `Segment`                       | One speaker turn — transcript metadata only.                                                       |
-| `SpanKind`, `TokenSequenceSpan` | Region kind (`text` / `audio` / `special`) and its `[start, end)` range.                           |
+| `TokenSpanKind`, `TokenSequenceSpan` | Region kind (`text` / `audio` / `special`) and its `[start, end)` range.                           |
 | `TokenizedSequenceLayout`       | Per-model geometry: channel map, which token column each head scores against, hidden/logit widths. |
 | `TokenizedSequence`             | Model-ready `(L, C+1)` tokens/mask, plus layout and spans.                                         |
 | `FeaturizedSequence`            | Teacher-forced `{logits, hiddens}` of length `L-1`; index `i` predicts `tokens[i+1]`.              |
@@ -116,12 +116,35 @@ artifacts — `expresso-rows60` was built from 60 rows and cannot be rebuilt fro
 
 ## Environments
 
-MisoTTS pins Transformers 4.49 while the MLX stack pins Transformers 5.6 / `huggingface-hub` 1.5, so
-these conflict — install only one extra per environment:
+MisoTTS pins Transformers 4.49, the MLX stack pins Transformers 5.6 / `huggingface-hub` 1.5, and
+chatterbox-tts pins Transformers 5.2 / torch 2.6 — all three conflict, so install only one extra per
+environment:
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"    # deprecated Qwen3 / Fish backends
-uv pip install -e ".[dataprep-miso]"   # Miso (replaces the pins above)
-uv pip install -e ../MisoTTS           # to use a locally cloned MisoTTS
+uv pip install -e ".[dataprep-mlx]"         # deprecated Qwen3 / Fish backends
+uv pip install -e ".[dataprep-miso]"        # Miso (replaces the pins above)
+uv pip install -e ".[dataprep-chatterbox]"  # Chatterbox AR + Flash (tokenize only)
+uv pip install -e ../MisoTTS                # to use a locally cloned MisoTTS
 ```
+
+## Chatterbox backend (tokenize only)
+
+Prepares finetuning data for both Chatterbox AR (500M English) and Chatterbox Flash, which share a
+tokenizer — Flash subclasses the same `T3` and differs only by an input-only `[MASK]` embedding row.
+There is no featurizer yet, so `prepare` and `--stage featurize` are rejected up front:
+
+```bash
+python -m dataprep.cli inspect --model chatterbox --rows 3 --stage tokenize
+```
+
+Unlike the RVQ backends, Chatterbox is two-stream: one S3 codebook (25 Hz, vocab 6561) plus a
+separate text vocabulary, laid out as `[cond | SOT text EOT | SOS y EOS]` with speech in column 0 and
+text in column 1. The leading 34 frames are a reserved, unsupervised placeholder for T3's fixed
+conditioning prefix (1 speaker + 32 perceiver + 1 emotion), keeping grid positions equal to model
+positions. The 256-d speaker embedding is precomputed to `embedding_context.pt`; prompt speech ids
+are sliced from the sequence's own audio at collate time.
+
+Segments are encoded one at a time from their own waveform, since S3's encoder is bidirectional.
+Segments whose audio runs far longer than their transcript implies are rejected to `failures.jsonl` —
+Expresso has at least one 105 s segment labelled "Thank you.".
 

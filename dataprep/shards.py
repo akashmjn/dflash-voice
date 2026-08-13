@@ -34,7 +34,7 @@ import torch
 from dataprep.common import (
     FeaturizedSequence,
     ShardSample,
-    SpanKind,
+    TokenSpanKind,
     TokenizedSequence,
     _as_numpy,
 )
@@ -266,7 +266,7 @@ def build_sample(
     they are off by default and only worth paying for when distilling against
     the teacher's full distribution rather than the ground-truth codes.
     """
-    audio_spans = seq.spans_of(SpanKind.AUDIO)
+    audio_spans = seq.spans_of(TokenSpanKind.AUDIO)
     if not audio_spans:
         return None
     # Miso: one audio span per sequence; multi-span packing not supported yet.

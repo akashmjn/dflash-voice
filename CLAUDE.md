@@ -71,13 +71,14 @@ data/
 
 ## Environments (mutually exclusive extras)
 
-`dataprep-miso` pins Transformers 4.49 (via MisoTTS); `dataprep-mlx`/`mlx_decode` pin Transformers 5.6 + huggingface-hub 1.5. Only install one extra per venv.
+`dataprep-miso` pins Transformers 4.49 (via MisoTTS); `dataprep-mlx`/`mlx_decode` pin Transformers 5.6 + huggingface-hub 1.5; `dataprep-chatterbox` pins Transformers 5.2 + torch 2.6 (via chatterbox-tts). Only install one extra per venv.
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"    # deprecated Qwen3 / Fish dataprep + MLX inference
-uv pip install -e ".[dataprep-miso]"   # Miso dataprep (needs MisoTTS package)
-uv pip install -e ".[mlx_decode]"      # MLX inference/benchmarking only
-uv pip install -e ".[dev]"             # pytest, modal
+uv pip install -e ".[dataprep-mlx]"        # deprecated Qwen3 / Fish dataprep + MLX inference
+uv pip install -e ".[dataprep-miso]"       # Miso dataprep (needs MisoTTS package)
+uv pip install -e ".[dataprep-chatterbox]" # Chatterbox AR + Flash dataprep (tokenize only)
+uv pip install -e ".[mlx_decode]"          # MLX inference/benchmarking only
+uv pip install -e ".[dev]"                 # pytest, modal
 ```
 
 Requires Apple Silicon (MLX) for anything touching `mlx_decode` or the MLX dataprep backends.

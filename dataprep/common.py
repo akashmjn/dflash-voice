@@ -8,6 +8,8 @@ Pipeline objects are intentionally small and self-describing:
   that position ``i`` is the model state after consuming ``tokens[i]``
   (predicting ``tokens[i+1]``). Use spans to select regions; no separate
   ``audio_positions`` list.
+- ``SequenceEmbeddingContext`` — precomputed *continuous* conditioning that has
+  no integer token to live in, kept beside the sequences rather than inside them.
 - ``ShardSample`` — one sequence serialized for a WebDataset shard.
 """
 
@@ -26,15 +28,31 @@ import torch
 NATS_TO_BITS = 1.0 / math.log(2.0)
 
 
-class SpanKind(str, Enum):
+class TokenSpanKind(str, Enum):
     """Region labels on a flat ``(L, C+1)`` sequence.
 
     Consumers should branch on these instead of model-specific layout rules.
+
+    Boundary markers get their own kinds rather than a shared ``SPECIAL``
+    because token values cannot identify them: id 0 is a real EOS for some
+    models and the grid's "no token here" fill everywhere else.
     """
 
     TEXT = "text"
     AUDIO = "audio"
-    SPECIAL = "special"  # bos/eos/pad/prefix/chat-control tokens
+    BOS_TEXT = "bos_text"
+    EOS_TEXT = "eos_text"
+    BOS_AUDIO = "bos_audio"
+    EOS_AUDIO = "eos_audio"
+    PREFIX = "prefix"  # reserved, never supervised
+    SPECIAL = "special"  # anything not worth naming; also the pre-split label
+
+
+#: Token ids each span kind may hold, as ``{kind: (low, high)}``, ``high``
+#: exclusive. Optional per-backend input to :meth:`TokenizedSequence.validate`;
+#: omitted kinds go unchecked. Each range is checked only on the channels its
+#: kind names, so text and audio keep independent bounds.
+TokenSpanIdRange = dict[TokenSpanKind, tuple[int, int]]
 
 
 @dataclass
@@ -85,7 +103,7 @@ class TokenSequenceSpan:
     segment_id: int
     start: int
     end: int
-    kind: SpanKind
+    kind: TokenSpanKind
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -103,7 +121,7 @@ class TokenSequenceSpan:
             segment_id=int(payload["segment_id"]),
             start=int(payload["start"]),
             end=int(payload["end"]),
-            kind=SpanKind(payload["kind"]),
+            kind=TokenSpanKind(payload["kind"]),
         )
 
 
@@ -247,34 +265,28 @@ class TokenizedSequence:
         """Real length, ignoring bucket padding."""
         return self.length - self.padding
 
-    def validate(self) -> None:
-        """Check ``(L, C+1)`` layout and that mask/token channels agree."""
+    def validate(self, token_ranges: "TokenSpanIdRange | None" = None) -> None:
+        """Check the ``(L, C+1)`` grid, treating spans as the source of truth.
+
+        Structural by default: shapes, padding, and spans ordered,
+        non-overlapping, and clear of padding. With ``token_ranges``, also
+        checks token values against what each span kind claims to hold --
+        the only way to catch a bad boundary frame, since id 0 is both a
+        real EOS and the grid's "no token here" fill.
+        """
         expected_channels = self.layout.num_codebooks + 1
         tokens = _as_numpy(self.tokens)
-        mask = _as_numpy(self.mask).astype(bool)
         if tokens.ndim != 2:
             raise ValueError(
                 f"Expected sequence tokens shaped (L, C+1), got {tokens.shape}"
             )
-        if mask.shape != tokens.shape:
-            raise ValueError("Sequence mask must have the same shape as tokens")
         if int(tokens.shape[1]) != expected_channels:
             raise ValueError(
                 f"Expected {expected_channels} sequence channels for "
                 f"{self.layout.num_codebooks} codebooks, got {tokens.shape[1]}"
             )
-
-        text_channel = self.layout.text_column
-        audio_channels = list(self.layout.audio_channels)
-        audio_active = mask[:, audio_channels].any(axis=1)
-        if np.any(tokens[~audio_active][:, audio_channels] != 0):
-            raise ValueError(
-                "Audio-channel tokens must be zero where the audio mask is inactive"
-            )
-        if np.any(tokens[~mask[:, text_channel], text_channel] != 0):
-            raise ValueError(
-                "Text-channel tokens must be zero where the text mask is inactive"
-            )
+        if self.mask is not None and _as_numpy(self.mask).shape != tokens.shape:
+            raise ValueError("Sequence mask must have the same shape as tokens")
 
         if self.padding:
             if not 0 < self.padding < self.length:
@@ -283,15 +295,50 @@ class TokenizedSequence:
                 )
             if np.any(tokens[self.unpadded_length :] != 0):
                 raise ValueError("Padded frames must have zero tokens")
-            if np.any(mask[self.unpadded_length :]):
-                raise ValueError("Padded frames must have an all-False mask")
 
-        for span in self.spans:
+        previous_end = 0
+        for span in sorted(self.spans, key=lambda item: item.start):
             if not 0 <= span.start < span.end <= self.length:
                 raise ValueError(f"Invalid sequence span {span}")
+            # Spans cover real frames only, so padding is out of bounds too.
+            if span.end > self.unpadded_length:
+                raise ValueError(
+                    f"Span {span.kind.value} [{span.start}, {span.end}) runs into "
+                    f"bucket padding, which starts at {self.unpadded_length}"
+                )
+            if span.start < previous_end:
+                raise ValueError(
+                    f"Span {span.kind.value} [{span.start}, {span.end}) overlaps "
+                    f"the previous span, which ends at {previous_end}"
+                )
+            previous_end = span.end
 
-    def spans_of(self, kind: SpanKind | str) -> list[TokenSequenceSpan]:
-        kind = SpanKind(kind)
+            if token_ranges is None:
+                continue
+            bounds = token_ranges.get(span.kind)
+            if bounds is None:
+                continue
+            low, high = bounds
+            # Check only the channels the kind names; the other one is
+            # zero-filled and would drag every lower bound down to 0.
+            # PREFIX and SPECIAL name neither, so they cover all channels.
+            if span.kind.value.endswith("text"):
+                channels = [self.layout.text_column]
+            elif span.kind.value.endswith("audio"):
+                channels = list(self.layout.audio_channels)
+            else:
+                channels = list(range(expected_channels))
+            block = tokens[span.start : span.end][:, channels]
+            if block.size and (block.min() < low or block.max() >= high):
+                raise ValueError(
+                    f"Span {span.kind.value} [{span.start}, {span.end}) holds "
+                    f"tokens in [{int(block.min())}, {int(block.max())}] on "
+                    f"channels {channels}, outside the declared range "
+                    f"[{low}, {high})"
+                )
+
+    def spans_of(self, kind: TokenSpanKind | str) -> list[TokenSequenceSpan]:
+        kind = TokenSpanKind(kind)
         return [span for span in self.spans if span.kind == kind]
 
     @property
@@ -386,6 +433,76 @@ class TokenizedSequence:
 
 
 @dataclass
+class SequenceEmbeddingContext:
+    """Precomputed continuous conditioning for one sequence.
+
+    Some models condition on vectors rather than tokens, and those have no
+    integer id to occupy a column of the ``(L, C+1)`` token grid. Chatterbox is the
+    motivating case: a 256-d GE2E speaker embedding. Keeping them out of
+    :class:`TokenizedSequence` leaves it an integer token array for every
+    backend, rather than widening its dtype or adding a float channel that
+    ``validate`` cannot check.
+
+    ``values`` is free-form so a backend can add a field without touching this
+    class.
+    """
+
+    values: dict[str, Any]  # chatterbox saves {'speaker_emb': (256,) tensor}
+
+    def __getitem__(self, key: str) -> Any:
+        return self.values[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.values
+
+    @staticmethod
+    def save_all(
+        directory: str | Path,
+        contexts: Sequence["SequenceEmbeddingContext | None"],
+    ) -> Path | None:
+        """Write ``embedding_context.pt``, or remove it when nothing is stored.
+
+        Indexed positionally against the sequences saved alongside. A backend
+        with no continuous conditioning writes no file, so this stays invisible
+        to models that do not need it.
+        """
+        directory = Path(directory)
+        path = directory / "embedding_context.pt"
+        if not any(item is not None for item in contexts):
+            path.unlink(missing_ok=True)
+            return None
+        directory.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            [
+                None
+                if item is None
+                else {key: _as_torch(value) for key, value in item.values.items()}
+                for item in contexts
+            ],
+            path,
+        )
+        return path
+
+    @staticmethod
+    def load_all(
+        directory: str | Path, *, count: int
+    ) -> list["SequenceEmbeddingContext | None"]:
+        """Read ``embedding_context.pt``; all-``None`` when the file is absent."""
+        path = Path(directory) / "embedding_context.pt"
+        if not path.exists():
+            return [None] * count
+        rows = torch.load(path, map_location="cpu", weights_only=True)
+        if len(rows) != count:
+            raise ValueError(
+                f"{path} holds {len(rows)} contexts for {count} sequences"
+            )
+        return [
+            None if row is None else SequenceEmbeddingContext(values=dict(row))
+            for row in rows
+        ]
+
+
+@dataclass
 class FeaturizedSequence:
     """Teacher-forced outputs aligned to a ``TokenizedSequence`` of length ``L``.
 
@@ -454,8 +571,8 @@ class FeaturizedSequence:
                     f"Span {span} incompatible with feature length {feature_len}"
                 )
 
-    def spans_of(self, kind: SpanKind | str) -> list[TokenSequenceSpan]:
-        kind = SpanKind(kind)
+    def spans_of(self, kind: TokenSpanKind | str) -> list[TokenSequenceSpan]:
+        kind = TokenSpanKind(kind)
         return [span for span in self.spans if span.kind == kind]
 
     @staticmethod
@@ -642,7 +759,7 @@ def audio_frame_metrics(
     entropy_parts: list[Any] = []
     nll_parts: list[Any] = []
     position_parts: list[Any] = []
-    for span in features.spans_of(SpanKind.AUDIO):
+    for span in features.spans_of(TokenSpanKind.AUDIO):
         pred = features.feature_slice_for_targets(span.start, span.end)
         targets = torch.as_tensor(tokens[span.start : span.end], dtype=torch.long)
         entropy_cb, nll_cb = [], []

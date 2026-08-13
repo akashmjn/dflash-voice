@@ -3,7 +3,7 @@ import math
 import pytest
 import torch
 
-from dataprep.common import SpanKind, audio_frame_metrics, nll_summary
+from dataprep.common import TokenSpanKind, audio_frame_metrics, nll_summary
 from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import tokenize_segment
 
@@ -27,7 +27,7 @@ def test_featurize_segment0(segment0, model, expected_featurized):
     assert features.length == expected["sequence_length"]
     assert features.length == sequence.length - 1
 
-    audio_span = sequence.spans_of(SpanKind.AUDIO)[0]
+    audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]
     pred = features.feature_slice_for_targets(audio_span.start, audio_span.end)
     assert pred.stop - pred.start == expected["pred_slice_len"]
 

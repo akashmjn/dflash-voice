@@ -115,7 +115,7 @@ def wds_root(tmp_path_factory, monkeypatch_session):
         assert len(sequences) == len(features)
         for seq, feat in zip(sequences, features):
             tokenizer._pairs[id(seq)] = feat
-        return sequences, None
+        return sequences, None, [None] * len(sequences)
 
     monkeypatch_session.setattr(pipeline, "tokenize_example", fake_tokenize)
 
@@ -327,7 +327,7 @@ def test_sample_shapes_and_dtypes(shard_samples):
 
 def _load_row_orig(row: int):
     """Return (sequences, features) from the original PT artifacts."""
-    from dataprep.common import FeaturizedSequence, SpanKind, TokenizedSequence
+    from dataprep.common import FeaturizedSequence, TokenSpanKind, TokenizedSequence
 
     seqs, _ = TokenizedSequence.load_all(MISO_TOK / str(row))
     feats, _ = FeaturizedSequence.load_all(MISO_FEAT / str(row))
@@ -336,7 +336,7 @@ def _load_row_orig(row: int):
 
 def test_targets_match_original_tokens(shard_samples):
     """Exported targets must exactly match tokens[audio_span, :32] from sequences.pt."""
-    from dataprep.common import SpanKind
+    from dataprep.common import TokenSpanKind
 
     # Build lookup of already-loaded rows to avoid repeated IO.
     rows_loaded: dict[int, tuple] = {}
@@ -351,7 +351,7 @@ def test_targets_match_original_tokens(shard_samples):
         seqs, _ = rows_loaded[row]
 
         seq = seqs[seq_id]
-        audio_spans = seq.spans_of(SpanKind.AUDIO)
+        audio_spans = seq.spans_of(TokenSpanKind.AUDIO)
         assert len(audio_spans) == 1, f"Expected 1 audio span, got {len(audio_spans)}"
         span = audio_spans[0]
         s_idx, e_idx = span.start, span.end
@@ -368,7 +368,7 @@ def test_targets_match_original_tokens(shard_samples):
 
 def test_hiddens_close_to_original(shard_samples):
     """Exported hiddens (fp16) must round-trip close to stored hiddens (fp32)."""
-    from dataprep.common import SpanKind
+    from dataprep.common import TokenSpanKind
 
     rows_loaded: dict[int, tuple] = {}
 
@@ -383,7 +383,7 @@ def test_hiddens_close_to_original(shard_samples):
 
         seq = seqs[seq_id]
         feat = feats[seq_id]
-        span = seq.spans_of(SpanKind.AUDIO)[0]
+        span = seq.spans_of(TokenSpanKind.AUDIO)[0]
         s_idx, e_idx = span.start, span.end
 
         # Original hiddens for the audio span (note: teacher-forcing offset)
@@ -424,7 +424,7 @@ def test_nll_parity_with_saved_metrics(row):
     if not (MISO_FEAT / str(row)).exists():
         pytest.skip(f"miso_featurized/{row} not found")
 
-    from dataprep.common import FeaturizedSequence, SpanKind, TokenizedSequence, audio_frame_metrics, nll_summary
+    from dataprep.common import FeaturizedSequence, TokenSpanKind, TokenizedSequence, audio_frame_metrics, nll_summary
 
     seqs, _ = TokenizedSequence.load_all(MISO_TOK / str(row))
     feats, _ = FeaturizedSequence.load_all(MISO_FEAT / str(row))

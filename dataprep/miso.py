@@ -14,7 +14,7 @@ from dataprep.common import (
     Segment,
     TokenizedSequenceLayout,
     TokenSequenceSpan,
-    SpanKind,
+    TokenSpanKind,
     TokenizedSequence,
 )
 
@@ -286,7 +286,7 @@ class MisoTokenizer:
                     segment_id=segment.segment_id,
                     start=position,
                     end=position + len(text_ids),
-                    kind=SpanKind.TEXT,
+                    kind=TokenSpanKind.TEXT,
                 )
             )
             position += len(text_ids)
@@ -311,11 +311,13 @@ class MisoTokenizer:
                         segment_id=segment.segment_id,
                         start=position,
                         end=position + codes.shape[0],
-                        kind=SpanKind.AUDIO,
+                        kind=TokenSpanKind.AUDIO,
                     )
                 )
                 position += codes.shape[0]
 
+                # All-zero tokens, same as the grid's "no token here" fill --
+                # the EOS_AUDIO span is what marks this as a real stop frame.
                 eos = torch.zeros(1, channels, dtype=torch.long)
                 eos_mask = torch.zeros_like(eos, dtype=torch.bool)
                 eos_mask[:, :-1] = True
@@ -327,7 +329,7 @@ class MisoTokenizer:
                         segment_id=segment.segment_id,
                         start=position,
                         end=position + 1,
-                        kind=SpanKind.SPECIAL,
+                        kind=TokenSpanKind.EOS_AUDIO,
                     )
                 )
                 position += 1

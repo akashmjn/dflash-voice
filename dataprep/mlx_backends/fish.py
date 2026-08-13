@@ -17,7 +17,7 @@ from dataprep.common import (
     Segment,
     TokenizedSequenceLayout,
     TokenSequenceSpan,
-    SpanKind,
+    TokenSpanKind,
     TokenizedSequence,
     _as_numpy,
 )
@@ -43,7 +43,7 @@ def _resample(audio: np.ndarray, source_rate: int, target_rate: int) -> np.ndarr
 def _contiguous_spans(
     flags: np.ndarray,
     *,
-    kind: SpanKind,
+    kind: TokenSpanKind,
     source_dataset_id: int,
     segment_id: int,
     offset: int,
@@ -314,7 +314,7 @@ class FishTokenizer:
             spans.extend(
                 _contiguous_spans(
                     ~audio_flags,
-                    kind=SpanKind.SPECIAL,
+                    kind=TokenSpanKind.SPECIAL,
                     source_dataset_id=segment.source_dataset_id,
                     segment_id=segment.segment_id,
                     offset=position,
@@ -323,7 +323,7 @@ class FishTokenizer:
             spans.extend(
                 _contiguous_spans(
                     audio_flags,
-                    kind=SpanKind.AUDIO,
+                    kind=TokenSpanKind.AUDIO,
                     source_dataset_id=segment.source_dataset_id,
                     segment_id=segment.segment_id,
                     offset=position,

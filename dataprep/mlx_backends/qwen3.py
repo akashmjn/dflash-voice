@@ -18,7 +18,7 @@ from dataprep.common import (
     Segment,
     TokenizedSequenceLayout,
     TokenSequenceSpan,
-    SpanKind,
+    TokenSpanKind,
     TokenizedSequence,
     _as_numpy,
 )
@@ -156,7 +156,7 @@ class Qwen3Featurizer:
         sequence.validate()
         tokens = mx.array(sequence.tokens, dtype=mx.int32)
 
-        spans_by_segment: dict[int, dict[SpanKind, TokenSequenceSpan]] = {}
+        spans_by_segment: dict[int, dict[TokenSpanKind, TokenSequenceSpan]] = {}
         for span in sequence.spans:
             spans_by_segment.setdefault(span.segment_id, {})[span.kind] = span
 
@@ -167,9 +167,9 @@ class Qwen3Featurizer:
 
         for segment_id in sorted(spans_by_segment):
             spans = spans_by_segment[segment_id]
-            if SpanKind.TEXT not in spans or SpanKind.AUDIO not in spans:
+            if TokenSpanKind.TEXT not in spans or TokenSpanKind.AUDIO not in spans:
                 continue
-            text_span, audio_span = spans[SpanKind.TEXT], spans[SpanKind.AUDIO]
+            text_span, audio_span = spans[TokenSpanKind.TEXT], spans[TokenSpanKind.AUDIO]
             e_t, text_stream, text_pad = self._prepare_segment(
                 tokens, text_span=text_span, audio_span=audio_span
             )
@@ -357,7 +357,7 @@ class Qwen3Tokenizer:
                     segment_id=segment.segment_id,
                     start=position,
                     end=position + len(text_ids),
-                    kind=SpanKind.TEXT,
+                    kind=TokenSpanKind.TEXT,
                 )
             )
             position += len(text_ids)
@@ -377,7 +377,7 @@ class Qwen3Tokenizer:
                         segment_id=segment.segment_id,
                         start=position,
                         end=position + len(prefix_ids),
-                        kind=SpanKind.SPECIAL,
+                        kind=TokenSpanKind.SPECIAL,
                     )
                 )
                 position += len(prefix_ids)
@@ -399,7 +399,7 @@ class Qwen3Tokenizer:
                         segment_id=segment.segment_id,
                         start=position,
                         end=position + codes.shape[0],
-                        kind=SpanKind.AUDIO,
+                        kind=TokenSpanKind.AUDIO,
                     )
                 )
                 position += int(codes.shape[0])
@@ -416,7 +416,7 @@ class Qwen3Tokenizer:
                         segment_id=segment.segment_id,
                         start=position,
                         end=position + 1,
-                        kind=SpanKind.SPECIAL,
+                        kind=TokenSpanKind.SPECIAL,
                     )
                 )
                 position += 1

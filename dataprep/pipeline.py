@@ -1,6 +1,6 @@
 """Tokenize and featurize dataset rows: the two compute stages of dataprep.
 
-Two paths over the same stages. ``prepare_row``/``featurize_row`` read and write
+Two paths over the same stages. ``tokenize_row``/``featurize_row`` read and write
 per-row directories under ``data/`` for inspection; ``stream_prepared_samples``
 runs the same work over a stream of decoded rows and yields shard-ready samples,
 touching no disk. ``dataprep.shards.shard_prepare`` drives the latter.
@@ -22,6 +22,7 @@ from tqdm import tqdm
 from dataprep.common import (
     FeaturizedSequence,
     Segment,
+    SequenceEmbeddingContext,
     ShardSample,
     TokenizedSequence,
     _as_torch,
@@ -69,9 +70,10 @@ def load_tokenizer(
 ):
     """Build a tokenizer backend.
 
-    ``miso`` is the maintained backend. ``qwen3`` and ``fish`` are deprecated
-    MLX-only backends kept for reproducing ``experiments/expresso_nll_entropy/``;
-    they warn on use -- see ``dataprep/mlx_backends/README.md``.
+    ``miso`` and ``chatterbox`` are the maintained backends. ``qwen3`` and
+    ``fish`` are deprecated MLX-only backends kept for reproducing
+    ``experiments/expresso_nll_entropy/``; they warn on use -- see
+    ``dataprep/mlx_backends/README.md``.
 
     ``bucket_frames`` pads sequences up to a multiple, which bounds the number of
     the shapes seen by featurizer calls. Workaround to avoid unbounded memory growth
@@ -87,6 +89,15 @@ def load_tokenizer(
             featurizer=MisoFeaturizer(device=device),
             bucket_frames=bucket_frames,
         )
+
+    if model == "chatterbox":
+        # Tokenize-only: the featurizer is a stub, so 'prepare' and
+        # '--stage featurize' are rejected in dataprep.cli rather than here.
+        from dataprep.chatterbox import CHATTERBOX_REPO, ChatterboxTokenizer
+
+        if bucket_frames:
+            raise ValueError(f"{model!r} does not support bucket_frames")
+        return ChatterboxTokenizer(model_id or CHATTERBOX_REPO, device=device)
 
     if model not in DEPRECATED_MLX_MODELS:
         raise ValueError(f"Unknown model {model!r}")
@@ -144,6 +155,54 @@ def slice_segment_codes(
     return codes_by_segment
 
 
+def slice_segment_audio(
+    segments: Sequence[Segment],
+    audio: Any,
+    *,
+    sample_rate: int,
+) -> dict[int, Any]:
+    """Cut each segment's waveform out of the row audio, by sample.
+
+    The sibling of :func:`slice_segment_codes`, for backends that need the audio
+    itself -- to encode per segment (see :func:`encode_segment_codes`), or to
+    derive something else from it such as a speaker embedding.
+    """
+    audio_by_segment: dict[int, Any] = {}
+    for segment in segments:
+        channel = audio[segment.source_audio_channel_id]
+        total = int(channel.shape[-1])
+        start = max(0, int(segment.start_sec * sample_rate))
+        end = min(total, int(round(segment.end_sec * sample_rate)))
+        if end <= start:
+            raise ValueError(
+                f"Segment {segment.segment_id} maps to an empty audio range"
+            )
+        audio_by_segment[segment.segment_id] = channel[start:end]
+    return audio_by_segment
+
+
+def encode_segment_codes(
+    segments: Sequence[Segment],
+    audio_slices: Mapping[int, Any],
+    tokenizer,
+    *,
+    sample_rate: int,
+) -> dict[int, Any]:
+    """Encode each segment's own waveform, one codec call per segment.
+
+    The default path encodes a whole channel once and slices it by frame, which
+    is cheaper and correct for a causal or strictly local codec. It is wrong for
+    an encoder that attends across the clip: S3 is bidirectional, so sliced
+    frames would not match what the model sees given that segment alone.
+    """
+    return {
+        segment.segment_id: tokenizer.audio_codec.encode(
+            audio_slices[segment.segment_id], sample_rate
+        )
+        for segment in tqdm(segments, desc="audio encode", unit="seg", leave=False)
+    }
+
+
 def _pack_segments(
     segments: Sequence[Segment],
     tokenizer,
@@ -180,18 +239,40 @@ def build_sequences(
     row: int,
     log_root: Path,
     pack_segments: bool = False,
-) -> list[TokenizedSequence]:
+    audio_slices: Mapping[int, Any] | None = None,
+    sample_rate: int | None = None,
+) -> tuple[list[TokenizedSequence], list[Any]]:
+    """Tokenize each segment, returning ``(sequences, embedding_contexts)``.
+
+    ``embedding_contexts`` runs parallel to ``sequences``, all-``None`` unless
+    the backend implements ``embedding_context`` (see
+    :class:`dataprep.common.SequenceEmbeddingContext`). Building it here rather
+    than in ``apply_chat_template`` keeps the tokenizer signature uniform and
+    keeps the two lists in step when a failing segment is dropped.
+    """
     if pack_segments:
-        return _pack_segments(segments, tokenizer, audio_codes=audio_codes)
+        chunks = _pack_segments(segments, tokenizer, audio_codes=audio_codes)
+        return chunks, [None] * len(chunks)
+
+    build_context = getattr(tokenizer, "embedding_context", None)
     sequences: list[TokenizedSequence] = []
+    contexts: list[Any] = []
     for segment in tqdm(segments, desc="tokenize", unit="seg", leave=False):
         try:
-            sequences.append(
-                tokenizer.apply_chat_template([segment], audio_codes=audio_codes)
+            sequence = tokenizer.apply_chat_template(
+                [segment], audio_codes=audio_codes
             )
+            context = None
+            if build_context is not None and audio_slices is not None:
+                context = build_context(
+                    segment, audio_slices[segment.segment_id], sample_rate
+                )
         except Exception as exc:
             log_failure(log_root, stage="tokenize", row=row, exc=exc)
-    return sequences
+            continue
+        sequences.append(sequence)
+        contexts.append(context)
+    return sequences, contexts
 
 
 def tokenize_example(
@@ -201,19 +282,30 @@ def tokenize_example(
     tokenizer,
     log_root: Path = DEFAULT_LOG_ROOT,
     pack_segments: bool = False,
-) -> tuple[list[TokenizedSequence], list]:
+) -> tuple[list[TokenizedSequence], list, list[Any]]:
     """Encode a raw example's audio and build its tokenized sequences.
 
-    Returns ``(sequences, channel_codes)``. Shared by the disk-backed and
-    streaming paths so both number speakers and slice codes identically.
+    Returns ``(sequences, channel_codes, embedding_contexts)``. Shared by the
+    disk-backed and streaming paths so both number speakers and slice codes
+    identically.
+
+    A backend setting ``audio_codec.segmented_encode`` is encoded one segment at
+    a time (see :func:`encode_segment_codes`), leaving ``channel_codes`` empty
+    since no whole-channel pass runs.
     """
     row = example.row
-    channel_codes = [
-        tokenizer.audio_codec.encode(audio[channel], example.sample_rate)
-        for channel in tqdm(
-            range(example.num_channels), desc=f"row {row} encode", unit="ch", leave=False
-        )
-    ]
+    segmented = bool(getattr(tokenizer.audio_codec, "segmented_encode", False))
+    channel_codes = []
+    if not segmented:
+        channel_codes = [
+            tokenizer.audio_codec.encode(audio[channel], example.sample_rate)
+            for channel in tqdm(
+                range(example.num_channels),
+                desc=f"row {row} audio encode",
+                unit="ch",
+                leave=False,
+            )
+        ]
 
     segments = [
         Segment.from_transcript_item(raw, source_dataset_id=row)
@@ -225,17 +317,30 @@ def tokenize_example(
     for segment in segments:
         segment.speaker_id = speaker_ids.setdefault(segment.speaker, len(speaker_ids))
 
-    sequences = build_sequences(
+    audio_slices = None
+    if segmented:
+        audio_slices = slice_segment_audio(
+            segments, audio, sample_rate=example.sample_rate
+        )
+        audio_codes = encode_segment_codes(
+            segments, audio_slices, tokenizer, sample_rate=example.sample_rate
+        )
+    else:
+        audio_codes = slice_segment_codes(
+            segments, channel_codes, frame_rate=tokenizer.audio_codec.frame_rate
+        )
+
+    sequences, contexts = build_sequences(
         segments,
         tokenizer,
-        audio_codes=slice_segment_codes(
-            segments, channel_codes, frame_rate=tokenizer.audio_codec.frame_rate
-        ),
+        audio_codes=audio_codes,
         row=row,
         log_root=log_root,
         pack_segments=pack_segments,
+        audio_slices=audio_slices,
+        sample_rate=example.sample_rate,
     )
-    return sequences, channel_codes
+    return sequences, channel_codes, contexts
 
 
 def stream_prepared_samples(
@@ -267,7 +372,7 @@ def stream_prepared_samples(
             continue
         audio = example.audio
         try:
-            sequences, _ = tokenize_example(
+            sequences, _, _ = tokenize_example(
                 example,
                 audio,
                 tokenizer=tokenizer,
@@ -302,7 +407,7 @@ def stream_prepared_samples(
                 yield sample
 
 
-def prepare_row(
+def tokenize_row(
     row_dir: str | Path,
     *,
     model: str,
@@ -321,21 +426,23 @@ def prepare_row(
         f"{len(example.segments)} segment(s)"
     )
 
-    sequences, channel_codes = tokenize_example(
+    sequences, channel_codes, contexts = tokenize_example(
         example,
         audio,
         tokenizer=tokenizer,
         log_root=log_root,
         pack_segments=pack_segments,
     )
-    # The per-row codec dump is an inspection artifact; the streaming path skips it.
-    save_codebooks(
-        row_dir / f"{model}_codebooks.pt",
-        channel_codes,
-        sample_rate=tokenizer.audio_codec.sample_rate,
-        frame_rate=tokenizer.audio_codec.frame_rate,
-        num_codebooks=tokenizer.audio_codec.num_codebooks,
-    )
+    # The per-row codec dump is an inspection artifact; the streaming path skips
+    # it, and a segmented-encode backend has no whole-channel pass to dump.
+    if channel_codes:
+        save_codebooks(
+            row_dir / f"{model}_codebooks.pt",
+            channel_codes,
+            sample_rate=tokenizer.audio_codec.sample_rate,
+            frame_rate=tokenizer.audio_codec.frame_rate,
+            num_codebooks=tokenizer.audio_codec.num_codebooks,
+        )
 
     output_dir = Path(output_root) / dataset / "tokenized" / model / str(row)
     TokenizedSequence.save_all(
@@ -348,6 +455,7 @@ def prepare_row(
             "frame_rate": tokenizer.audio_codec.frame_rate,
         },
     )
+    SequenceEmbeddingContext.save_all(output_dir, contexts)
     tqdm.write(f"Tokenizing row {row}: wrote {len(sequences)} sequence(s) to {output_dir}")
     return output_dir
 
