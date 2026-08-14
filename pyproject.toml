@@ -19,6 +19,13 @@ include = ["mlx_decode*", "dataprep*", "train*"]
 exclude = ["mlx_decode.tests*", "dataprep.tests*", "train.tests*"]
 
 [project.optional-dependencies]
+
+dev = [
+    "pytest",
+    "modal",
+    "python-dotenv",
+]
+
 mlx_decode = [
     "mlx>=0.31.1",
     "mlx-lm==0.31.1",
@@ -27,31 +34,21 @@ mlx_decode = [
     "huggingface-hub==1.5.0",
 ]
 
-train = [
-    "transformers==5.6.0",
-    "torch>=2.2.0",
-    "webdataset==1.0.2",
-    "accelerate>=0.30.0",
-    "numpy",
-    "tqdm",
-]
-
-dev = [
-    "pytest",
-    "modal",
-]
-
-dataprep-miso = [
-    "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
-    "soundfile",
-    "pytest",
-]
 # Chatterbox AR + Flash tokenize. chatterbox-tts pins transformers==5.2.0 and
 # torch 2.6, so this is a third mutually-exclusive environment -- install it alone.
 dataprep-chatterbox = [
     "chatterbox-tts==0.1.7",
     "soundfile",
     "librosa",
+    # dataprep.shards writes tars via webdataset.TarWriter, so `prepare` needs it
+    # here and not only in the train extra.
+    "webdataset==1.0.2",
+    "pytest",
+]
+
+dataprep-miso = [
+    "miso-tts @ git+https://github.com/akashmjn/MisoTTS.git@akash/main",
+    "soundfile",
     "pytest",
 ]
 dataprep-mlx = [
@@ -66,6 +63,15 @@ dataprep-mlx = [
     "pytest",
     "marimo",
     "altair",
+]
+
+train = [
+    "transformers==5.6.0",
+    "torch>=2.2.0",
+    "webdataset==1.0.2",
+    "accelerate>=0.30.0",
+    "numpy",
+    "tqdm",
 ]
 
 [tool.pytest.ini_options]
