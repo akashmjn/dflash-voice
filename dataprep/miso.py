@@ -16,6 +16,7 @@ from dataprep.common import (
     TokenSequenceSpan,
     TokenSpanKind,
     TokenizedSequence,
+    bucket_length,
 )
 
 
@@ -121,11 +122,13 @@ def _channel_mask(sequence: TokenizedSequence) -> torch.Tensor:
 
     Text frames contribute the text column, audio frames the codebooks. Goes by
     span kind, not token value: an EOS_AUDIO frame is all zeros, the same as the
-    grid's fill. Frames no span covers, i.e. bucket padding, stay dead.
+    grid's fill. Bucket padding stays dead.
     """
     layout = sequence.layout
     mask = torch.zeros(sequence.length, layout.num_channels, dtype=torch.bool)
     for span in sequence.spans:
+        if span.kind is TokenSpanKind.PADDING:
+            continue
         if span.kind.value.endswith("text"):
             mask[span.start : span.end, layout.text_column] = True
         else:
@@ -241,7 +244,6 @@ class MisoFeaturizer:
             hiddens=hiddens[0].cpu().float(),
             spans=list(sequence.spans),
             layout=sequence.layout,
-            padding=sequence.padding,
         )
 
 
@@ -261,13 +263,6 @@ class MisoTokenizer:
         self.featurizer = featurizer or MisoFeaturizer()
 
         self.bucket_frames = bucket_frames
-
-    def bucket_length(self, length: int) -> int:
-        """Round ``length`` up to the next bucket, or return it unchanged."""
-        if self.bucket_frames <= 0:
-            return length
-        blocks = -(-length // self.bucket_frames)  # ceil
-        return blocks * self.bucket_frames
 
     def apply_chat_template(
         self,
@@ -346,7 +341,7 @@ class MisoTokenizer:
         tokens = torch.cat(blocks, dim=0)
 
         unpadded_length = int(tokens.shape[0])
-        padded_length = self.bucket_length(unpadded_length)
+        padded_length = bucket_length(unpadded_length, self.bucket_frames)
         if padded_length > self.max_seq_length:
             raise ValueError(
                 f"Bucket seq with padding {unpadded_length} -> {padded_length} exceeds Miso "
@@ -357,12 +352,20 @@ class MisoTokenizer:
             tokens = torch.cat(
                 [tokens, torch.zeros(padding, channels, dtype=tokens.dtype)], dim=0
             )
+            spans.append(
+                TokenSequenceSpan(
+                    source_dataset_id=segments[-1].source_dataset_id,
+                    segment_id=segments[-1].segment_id,
+                    start=unpadded_length,
+                    end=padded_length,
+                    kind=TokenSpanKind.PADDING,
+                )
+            )
 
         result = TokenizedSequence(
             tokens=tokens,
             spans=spans,
             layout=layout,
-            padding=padding,
         )
         result.validate()
         return result

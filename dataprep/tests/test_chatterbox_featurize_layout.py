@@ -1,8 +1,8 @@
 """Guards in ``ChatterboxFeaturizer.featurize`` that the golden cannot reach.
 
 ``test_featurize_segment0[chatterbox]`` covers alignment by scoring it -- an
-off-by-one moves the NLL. These two cases raise before any of that, so they need
-a fake model rather than the real one.
+off-by-one moves the NLL. These cases inspect or raise before any of that, so
+they need a fake model rather than the real one.
 """
 
 from __future__ import annotations
@@ -42,8 +42,10 @@ class _FakeT3:
     def __init__(self, cond_len: int = COND_PREFIX_LEN):
         self.hp = T3Config.english_only()
         self._cond_len = cond_len
+        self.cond_prompt = None
 
     def prepare_conditioning(self, cond):
+        self.cond_prompt = cond.cond_prompt_speech_tokens
         return torch.zeros(1, self._cond_len, HIDDEN_DIM)
 
     def _zeros(self, tokens):
@@ -112,6 +114,40 @@ def test_wrong_conditioning_width_is_rejected(sequence):
     context = SequenceEmbeddingContext(values={"speaker_emb": torch.zeros(256)})
     with pytest.raises(ValueError, match="COND_PREFIX_LEN"):
         featurizer.featurize(sequence, context=context)
+
+
+def test_short_utterance_prompt_stops_at_the_audio_span(sequence):
+    """An utterance shorter than ``speech_cond_prompt_len`` must not condition on
+    what follows its audio, which under bucketing is padding zeros.
+    """
+    hp = T3Config.english_only()
+    assert AUDIO_FRAMES < hp.speech_cond_prompt_len, "fixture must be under the cap"
+
+    padded = TokenizedSequence(
+        tokens=torch.cat([sequence.tokens, torch.zeros(9, 2, dtype=torch.long)]),
+        spans=[
+            *sequence.spans,
+            TokenSequenceSpan(
+                source_dataset_id=0,
+                segment_id=0,
+                start=sequence.length,
+                end=sequence.length + 9,
+                kind=TokenSpanKind.PADDING,
+            ),
+        ],
+        layout=sequence.layout,
+    )
+    padded.validate()
+
+    audio = padded.spans_of(TokenSpanKind.AUDIO)[0]
+    expected = padded.tokens[audio.start : audio.end, 0]
+
+    model = _FakeT3()
+    featurizer = ChatterboxFeaturizer(model=model)
+    context = SequenceEmbeddingContext(values={"speaker_emb": torch.zeros(256)})
+    featurizer.featurize(padded, context=context)
+
+    assert torch.equal(model.cond_prompt[0].cpu(), expected)
 
 
 def test_missing_speaker_embedding_is_rejected(sequence):

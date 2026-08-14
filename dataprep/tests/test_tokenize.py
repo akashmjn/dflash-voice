@@ -21,6 +21,7 @@ def test_miso_channel_mask_follows_spans():
         (0, 3, TokenSpanKind.TEXT),
         (3, 5, TokenSpanKind.AUDIO),
         (5, 6, TokenSpanKind.EOS_AUDIO),
+        (6, 8, TokenSpanKind.PADDING),
     ]
     sequence = TokenizedSequence(
         tokens=torch.zeros(8, 3, dtype=torch.long),
@@ -31,9 +32,10 @@ def test_miso_channel_mask_follows_spans():
             for start, end, kind in spans
         ],
         layout=layout,
-        padding=2,
     )
     sequence.validate()
+    assert sequence.padding == 2
+    assert sequence.unpadded_length == 6
 
     expected = torch.zeros(8, 3, dtype=torch.bool)
     expected[0:3, -1] = True  # text frames: text column only

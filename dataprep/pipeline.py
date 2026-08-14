@@ -81,6 +81,7 @@ def load_tokenizer(
     of ~+50MiB per new length upto 60GB+ on Pytorch MPS backend.
         https://github.com/pytorch/pytorch/issues/181213
         https://github.com/pytorch/pytorch/pull/181485
+    Supported by the maintained backends only; the deprecated MLX ones reject it.
     """
     if model == "miso":
         from dataprep.miso import MisoAudioCodec, MisoFeaturizer, MisoTokenizer
@@ -94,9 +95,11 @@ def load_tokenizer(
     if model == "chatterbox":
         from dataprep.chatterbox import CHATTERBOX_REPO, ChatterboxTokenizer
 
-        if bucket_frames:
-            raise ValueError(f"{model!r} does not support bucket_frames")
-        return ChatterboxTokenizer(model_id or CHATTERBOX_REPO, device=device)
+        return ChatterboxTokenizer(
+            model_id or CHATTERBOX_REPO,
+            device=device,
+            bucket_frames=bucket_frames,
+        )
 
     if model not in DEPRECATED_MLX_MODELS:
         raise ValueError(f"Unknown model {model!r}")
@@ -107,7 +110,9 @@ def load_tokenizer(
 
     warnings.warn(DEPRECATION_NOTE.format(model=model), DeprecationWarning, stacklevel=2)
     if bucket_frames:
-        raise ValueError(f"{model!r} does not support bucket_frames")
+        raise ValueError(
+            f"{model!r} does not support bucket_frames; pass --bucket-frames 0"
+        )
     if model == "qwen3":
         from dataprep.mlx_backends.qwen3 import Qwen3Tokenizer
 

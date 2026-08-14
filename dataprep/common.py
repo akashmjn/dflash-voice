@@ -36,6 +36,9 @@ class TokenSpanKind(str, Enum):
     Boundary markers get their own kinds rather than a shared ``SPECIAL``
     because token values cannot identify them: id 0 is a real EOS for some
     models and the grid's "no token here" fill everywhere else.
+
+    ``PREFIX`` and ``PADDING`` are both unsupervised but not interchangeable: a
+    prefix frame is fed to the model as a real embedding, padding is dead space.
     """
 
     TEXT = "text"
@@ -45,6 +48,7 @@ class TokenSpanKind(str, Enum):
     BOS_AUDIO = "bos_audio"
     EOS_AUDIO = "eos_audio"
     PREFIX = "prefix"  # reserved, never supervised
+    PADDING = "padding"  # trailing bucket fill, never supervised
     SPECIAL = "special"  # anything not worth naming; also the pre-split label
 
 
@@ -53,6 +57,14 @@ class TokenSpanKind(str, Enum):
 #: omitted kinds go unchecked. Each range is checked only on the channels its
 #: kind names, so text and audio keep independent bounds.
 TokenSpanIdRange = dict[TokenSpanKind, tuple[int, int]]
+
+
+def bucket_length(length: int, bucket_frames: int) -> int:
+    """Round ``length`` up to a multiple of ``bucket_frames`` (0 disables)."""
+    if bucket_frames <= 0:
+        return length
+    blocks = -(-length // bucket_frames)  # ceil
+    return blocks * bucket_frames
 
 
 @dataclass
@@ -244,9 +256,9 @@ class TokenizedSequence:
     arrangement described by ``layout``. ``spans`` demarcates contiguous regions of the
     token sequence (e.g. text, audio, ...) for interpretation by the consumer.
 
-    ``padding`` counts trailing frames appended to reach a bucket size, so
-    ``length`` is the padded height and ``unpadded_length`` the real content.
-    ``spans`` always cover real frames only, so consumers that slice by span never see it
+    Bucket padding is trailing fill appended to reach a bucket size, marked by a
+    ``PADDING`` span: ``length`` is the padded height, ``unpadded_length`` the real
+    content. No other kind covers it, so consumers slicing by span never see it.
 
     Spans are the only record of which columns of a frame carry a real token --
     a zero is equally a genuine id or the grid's fill. Backends needing a
@@ -256,12 +268,16 @@ class TokenizedSequence:
     tokens: Any
     spans: list[TokenSequenceSpan]
     layout: TokenizedSequenceLayout
-    padding: int = 0
 
     @property
     def length(self) -> int:
         """Padded height of ``tokens`` (== ``unpadded_length`` when unpadded)."""
         return int(self.tokens.shape[0])
+
+    @property
+    def padding(self) -> int:
+        """Trailing bucket-fill frames."""
+        return sum(span.end - span.start for span in self.spans_of(TokenSpanKind.PADDING))
 
     @property
     def unpadded_length(self) -> int:
@@ -289,20 +305,27 @@ class TokenizedSequence:
                 f"{self.layout.num_codebooks} codebooks, got {tokens.shape[1]}"
             )
 
-        if self.padding:
-            if not 0 < self.padding < self.length:
+        padding_spans = self.spans_of(TokenSpanKind.PADDING)
+        if len(padding_spans) > 1:
+            raise ValueError(
+                f"Expected at most one PADDING span, got {len(padding_spans)}"
+            )
+        if padding_spans:
+            pad = padding_spans[0]
+            if (pad.start, pad.end) != (self.unpadded_length, self.length):
                 raise ValueError(
-                    f"padding {self.padding} outside (0, {self.length})"
+                    f"PADDING span [{pad.start}, {pad.end}) must be the trailing "
+                    f"[{self.unpadded_length}, {self.length}) frames"
                 )
-            if np.any(tokens[self.unpadded_length :] != 0):
+            if np.any(tokens[pad.start :] != 0):
                 raise ValueError("Padded frames must have zero tokens")
 
         previous_end = 0
         for span in sorted(self.spans, key=lambda item: item.start):
             if not 0 <= span.start < span.end <= self.length:
                 raise ValueError(f"Invalid sequence span {span}")
-            # Spans cover real frames only, so padding is out of bounds too.
-            if span.end > self.unpadded_length:
+            # Every kind but PADDING covers real frames only.
+            if span.kind is not TokenSpanKind.PADDING and span.end > self.unpadded_length:
                 raise ValueError(
                     f"Span {span.kind.value} [{span.start}, {span.end}) runs into "
                     f"bucket padding, which starts at {self.unpadded_length}"
@@ -515,12 +538,20 @@ class FeaturizedSequence:
     spans: list[TokenSequenceSpan]
     layout: TokenizedSequenceLayout
     kv_cache: Any | None = None
-    padding: int = 0
 
     @property
     def length(self) -> int:
         """Feature length ``L - 1``, including any bucket padding."""
         return int(self.hiddens.shape[0])
+
+    @property
+    def padding(self) -> int:
+        """Trailing bucket-fill frames.
+
+        Spans are carried over unshifted, so this counts padded *tokens*; the
+        ``L - 1`` truncation drops a real frame, not a padded one.
+        """
+        return sum(span.end - span.start for span in self.spans_of(TokenSpanKind.PADDING))
 
     @property
     def unpadded_length(self) -> int:

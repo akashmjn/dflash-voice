@@ -41,6 +41,7 @@ from dataprep.common import (
     TokenizedSequence,
     TokenizedSequenceLayout,
     TokenSequenceSpan,
+    bucket_length,
 )
 
 CHATTERBOX_REPO = "ResembleAI/chatterbox"
@@ -289,7 +290,13 @@ class ChatterboxFeaturizer:
         include_kv: bool = False,
         context: SequenceEmbeddingContext | None = None,
     ) -> FeaturizedSequence:
-        """Teacher-forced forward pass: feature ``t`` predicts ``tokens[t+1]``."""
+        """Teacher-forced forward pass: feature ``t`` predicts ``tokens[t+1]``.
+
+        Embeds ``[cond | SOT text EOT | SOS y EOS]``, where ``cond`` is built from
+        the ``speaker_emb`` in ``context`` plus a speaker prompt taken from the
+        first ``speech_cond_prompt_len`` (<=150) frames of the utterance's own audio.
+        Resulting ``cond`` is a fixed length ``speech_cond_prompt_len`` (34) frames.
+        """
         if include_kv:
             raise NotImplementedError(
                 "Chatterbox teacher-forced KV export is not implemented yet"
@@ -320,14 +327,14 @@ class ChatterboxFeaturizer:
         text_tokens = tokens[text_start:text_end, -1].unsqueeze(0).to(device)
         speech_tokens = tokens[speech_start:speech_end, 0].unsqueeze(0).to(device)
 
-        # Prompt is the utterance's own leading audio, capped at the conditioned
-        # length -- a view of tokens the sequence already holds, so not stored.
-        prompt = tokens[audio.start : audio.start + hp.speech_cond_prompt_len, 0]
+        speaker_prompt = tokens[
+            audio.start : min(audio.start + hp.speech_cond_prompt_len, audio.end), 0
+        ]
         cond = T3Cond(
             speaker_emb=torch.as_tensor(context["speaker_emb"], dtype=dtype)
             .view(1, -1)
             .to(device),
-            cond_prompt_speech_tokens=prompt.unsqueeze(0).to(device),
+            cond_prompt_speech_tokens=speaker_prompt.unsqueeze(0).to(device),
             emotion_adv=DEFAULT_EMOTION_ADV * torch.ones(1, 1, 1, dtype=dtype, device=device),
         )
 
@@ -342,11 +349,19 @@ class ChatterboxFeaturizer:
             embeds = torch.cat(
                 [cond_emb, text_emb.to(dtype), speech_emb.to(dtype)], dim=1
             )
-            if embeds.shape[1] != sequence.length:
+            if embeds.shape[1] != sequence.unpadded_length:
                 raise ValueError(
-                    f"Built {embeds.shape[1]} input frames for a {sequence.length}-frame "
-                    f"sequence; COND_PREFIX_LEN ({COND_PREFIX_LEN}) no longer matches "
-                    f"the model's conditioning width"
+                    f"Built {embeds.shape[1]} input frames for a "
+                    f"{sequence.unpadded_length}-frame sequence; COND_PREFIX_LEN "
+                    f"({COND_PREFIX_LEN}) no longer matches the model's "
+                    f"conditioning width"
+                )
+            # Feed the bucket padding too, for a fixed set of input widths. No
+            # attention mask needed: the model is causal and padding is strictly
+            # trailing, so no real frame can attend to it.
+            if sequence.padding:
+                embeds = torch.nn.functional.pad(
+                    embeds, (0, 0, 0, sequence.padding)
                 )
             hidden = model.tfmr(
                 inputs_embeds=embeds, use_cache=False, return_dict=True
@@ -360,7 +375,6 @@ class ChatterboxFeaturizer:
             hiddens=hidden.cpu().float(),
             spans=list(sequence.spans),
             layout=sequence.layout,
-            padding=sequence.padding,
         )
 
 
@@ -378,10 +392,12 @@ class ChatterboxTokenizer:
         featurizer: ChatterboxFeaturizer | None = None,
         normalize_text: str = "en_us_cleaner",
         max_frames_per_text_token: float = MAX_FRAMES_PER_TEXT_TOKEN,
+        bucket_frames: int = 0,
     ):
         self.hp = T3Config.english_only()
         self.span_token_ranges = _span_token_ranges(self.hp)
         self.max_frames_per_text_token = max_frames_per_text_token
+        self.bucket_frames = bucket_frames
         self.audio_codec = audio_codec or ChatterboxAudioCodec(
             device=device, repo_id=model_id
         )
@@ -503,7 +519,8 @@ class ChatterboxTokenizer:
             num_codebooks=self.audio_codec.num_codebooks, text_channel=-1
         )
         length = COND_PREFIX_LEN + n_text + n_speech
-        tokens = torch.zeros(length, channels, dtype=torch.long)
+        padded_length = bucket_length(length, self.bucket_frames)
+        tokens = torch.zeros(padded_length, channels, dtype=torch.long)
         spans: list[TokenSequenceSpan] = []
 
         def add_span(start: int, end: int, kind: TokenSpanKind) -> None:
@@ -553,6 +570,9 @@ class ChatterboxTokenizer:
 
         if position != length:
             raise AssertionError(f"Built {position} frames, expected {length}")
+
+        if padded_length > length:
+            add_span(length, padded_length, TokenSpanKind.PADDING)
 
         result = TokenizedSequence(tokens=tokens, spans=spans, layout=layout)
         result.validate(self.span_token_ranges)

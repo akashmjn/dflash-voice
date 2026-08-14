@@ -30,7 +30,7 @@ on the same side and one speaker's turns cannot leak across the split.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import typer
 from tqdm import tqdm
@@ -64,6 +64,19 @@ app = typer.Typer(
     add_completion=False,
     help="Prepare dataset rows into WebDataset shards for training.",
 )
+
+
+def _tokenizer_device(tokenizer: Any) -> str:
+    """Device the backend actually placed its models on.
+
+    Read off the tokenizer rather than the ``--device`` option, which is
+    normally ``None`` and resolved per backend. The MLX ones report nothing.
+    """
+    for attr in ("featurizer", "audio_codec", "voice_encoder"):
+        device = getattr(getattr(tokenizer, attr, None), "device", None)
+        if device is not None:
+            return str(device)
+    return "n/a (MLX)"
 
 
 def _check_model(model: str) -> None:
@@ -108,11 +121,6 @@ def inspect_command(
     row_ids = list(range(rows))
     raw_root = data_root / dataset / "raw"
 
-    typer.echo(f"model      : {model}")
-    typer.echo(f"stage      : {stage}")
-    typer.echo(f"rows       : {rows}")
-    typer.echo(f"data root  : {data_root}")
-
     missing = [
         row
         for row in row_ids
@@ -122,6 +130,12 @@ def inspect_command(
         download_expresso(missing, root=raw_root)
 
     tokenizer = load_tokenizer(model, model_id=model_id, device=device)
+
+    typer.echo(f"model      : {model}")
+    typer.echo(f"stage      : {stage}")
+    typer.echo(f"rows       : {rows}")
+    typer.echo(f"data root  : {data_root}")
+    typer.echo(f"device     : {_tokenizer_device(tokenizer)}")
 
     paths: list[Path] = []
     if stage in ("tokenize", "all"):
@@ -211,18 +225,19 @@ def prepare_command(
             f"{wds_root} already exists; pass --force to overwrite or pick another --slug"
         )
 
+    tokenizer = load_tokenizer(model, device=device, bucket_frames=bucket_frames)
+
     typer.echo(f"model      : {model}")
     typer.echo(f"source     : {DEFAULT_DATASET} [{DEFAULT_SPLIT}]")
     typer.echo(f"rows       : {rows if rows is not None else 'all (streaming)'}")
     typer.echo(f"slug       : {resolved_slug}")
     typer.echo(f"output     : {wds_root}")
+    typer.echo(f"device     : {_tokenizer_device(tokenizer)}")
     typer.echo(f"logits     : {'yes' if include_logits else 'no'}")
     typer.echo(
         f"shuffle buf: {f'{shuffle_buffer} sequences' if shuffle_buffer else 'off (deterministic order)'}"
     )
     typer.echo(f"buckets    : {f'multiples of {bucket_frames}' if bucket_frames else 'off'}")
-
-    tokenizer = load_tokenizer(model, device=device, bucket_frames=bucket_frames)
 
     shard_prepare(
         stream_expresso(limit=rows),
