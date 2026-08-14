@@ -5,13 +5,16 @@ import torch
 
 from dataprep.common import TokenSpanKind, audio_frame_metrics, nll_summary
 from dataprep.pipeline import load_tokenizer
-from dataprep.tests.conftest import tokenize_segment
+from dataprep.tests.conftest import featurize_segment, tokenize_segment
+
+DEPRECATED_MODELS = ("qwen3", "fish")
 
 
 @pytest.mark.parametrize(
     "model",
     [
         pytest.param("miso", marks=pytest.mark.expensive),
+        pytest.param("chatterbox", marks=pytest.mark.expensive),
         # Deprecated MLX backends: skipped by default, run with -m deprecated.
         pytest.param("qwen3", marks=pytest.mark.deprecated),
         pytest.param("fish", marks=pytest.mark.deprecated),
@@ -21,7 +24,7 @@ def test_featurize_segment0(segment0, model, expected_featurized):
     tokenizer = load_tokenizer(model)
     expected = expected_featurized[model]
     sequence = tokenize_segment(segment0, tokenizer)
-    features = tokenizer.featurizer.featurize(sequence)
+    features = featurize_segment(segment0, tokenizer, sequence)
     features.validate(sequence_length=sequence.length)
 
     assert features.length == expected["sequence_length"]
@@ -44,7 +47,9 @@ def test_featurize_segment0(segment0, model, expected_featurized):
     entropy = metrics["entropy"].numpy()
     assert nll.shape == (expected["nll_frames"], expected["num_logits"])
 
-    # Sanity check: NLL must beat chance on every codebook
+    # Sanity check: NLL must beat chance on every codebook. Chance is over the
+    # full head, so it is loose where a head has unreachable ids (chatterbox
+    # spans 8194 but only 0..6562 are valid targets).
     codebook_nll = nll.mean(axis=0)
     codebook_entropy = entropy.mean(axis=0)
     for index, (value, chance) in enumerate(
@@ -54,19 +59,18 @@ def test_featurize_segment0(segment0, model, expected_featurized):
             f"codebook {index} NLL {value:.3f} nats is not meaningfully better than "
             f"chance ({chance:.3f})"
         )
-    # Sanity check: NLL must stay near predictive entropy. Confidently-wrong logits 
-    # (NLL >> entropy) mean the logits are being scored against the wrong targets or 
-    # bug in the forward pass (e.g. leaking future context)
+    # Sanity check: NLL must stay near predictive entropy. Above it means the
+    # logits are scored against the wrong targets; below it means future context
+    # leaks in. Exempt for the deprecated backends -- qwen3 cb0 trips it (NLL
+    # 4.01 vs entropy 0.97) and fish was never audited for the same class of bug.
+    # See dataprep/mlx_backends/README.md.
     excess = codebook_nll - codebook_entropy
-    if model == "miso":
-        # Only miso is held to this. qwen3 cb0 trips it (NLL 4.01 vs entropy 0.97)
-        # and fish was never audited for the same class of bug -- both are
-        # deprecated and unmaintained, so the gap is recorded rather than chased.
-        # See dataprep/mlx_backends/README.md.
-        assert excess.max() < 1.0, (
-            f"codebook {int(excess.argmax())} is confidently wrong: NLL "
-            f"{codebook_nll[excess.argmax()]:.3f} exceeds entropy "
-            f"{codebook_entropy[excess.argmax()]:.3f} by {excess.max():.3f} nats"
+    if model not in DEPRECATED_MODELS:
+        worst = int(abs(excess).argmax())
+        assert abs(excess[worst]) < 1.0, (
+            f"codebook {worst} is confidently wrong: NLL {codebook_nll[worst]:.3f} "
+            f"differs from entropy {codebook_entropy[worst]:.3f} by "
+            f"{excess[worst]:+.3f} nats"
         )
 
     torch.testing.assert_close(
@@ -76,9 +80,13 @@ def test_featurize_segment0(segment0, model, expected_featurized):
         rtol=3e-3,
     )
 
-    summary = nll_summary(nll, tokenizer.audio_codec.frame_rate)
-    for group, values in expected["nll_summary"].items():
-        for unit, value in values.items():
-            assert summary[group][unit] == pytest.approx(value, rel=3e-3), (
-                f"{group}.{unit}"
-            )
+    # nll_summary splits codebooks positionally ([:1] semantic, [1:] audio), so
+    # at C=1 the audio group is empty and semantic == total. The chatterbox
+    # fixture records that degenerate output rather than asserting on it.
+    if layout.num_codebooks > 1:
+        summary = nll_summary(nll, tokenizer.audio_codec.frame_rate)
+        for group, values in expected["nll_summary"].items():
+            for unit, value in values.items():
+                assert summary[group][unit] == pytest.approx(value, rel=3e-3), (
+                    f"{group}.{unit}"
+                )

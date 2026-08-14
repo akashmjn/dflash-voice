@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
 
@@ -10,6 +11,47 @@ from dataprep.common import Segment
 from dataprep.pipeline import slice_segment_codes
 
 FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures" / "segment0"
+
+#: The package each backend needs, and the extra that installs it. Presence
+#: only: a backend whose package is installed can still fail at runtime.
+BACKEND_REQUIREMENTS = {
+    "miso": ("generator", "dataprep-miso"),
+    "chatterbox": ("chatterbox", "dataprep-chatterbox"),
+    "qwen3": ("mlx_audio", "dataprep-mlx"),
+    "fish": ("mlx_audio", "dataprep-mlx"),
+}
+
+
+def backend_available(model: str) -> bool:
+    package, _ = BACKEND_REQUIREMENTS[model]
+    try:
+        return importlib.util.find_spec(package) is not None
+    except (ImportError, ValueError):
+        # find_spec raises, rather than returning None, on a half-installed package.
+        return False
+
+
+def pytest_collection_modifyitems(config, items):
+    """Skip backend tests whose extra is not installed in this venv.
+
+    A test opts in by parametrizing over ``model`` or by carrying
+    ``@pytest.mark.backend("miso")``. Modules that import a backend at top level
+    need their own ``importorskip``: this runs after the module is imported.
+    """
+    for item in items:
+        models = set()
+        if hasattr(item, "callspec"):
+            models.add(item.callspec.params.get("model"))
+        for marker in item.iter_markers(name="backend"):
+            models.update(marker.args)
+        for model in models & BACKEND_REQUIREMENTS.keys():
+            if not backend_available(model):
+                package, extra = BACKEND_REQUIREMENTS[model]
+                item.add_marker(
+                    pytest.mark.skip(
+                        reason=f"{model}: no {package!r} module; needs the {extra} extra"
+                    )
+                )
 
 
 @pytest.fixture(scope="session")
@@ -94,3 +136,17 @@ def tokenize_segment(segment0, tokenizer):
             frame_rate=tokenizer.audio_codec.frame_rate,
         )
     return tokenizer.apply_chat_template([segment], audio_codes=audio_codes)
+
+
+def featurize_segment(segment0, tokenizer, sequence):
+    """Featurize a sequence, supplying a context to backends that need one.
+
+    Chatterbox conditions on a speaker embedding that has no token id, so it
+    takes the ``SequenceEmbeddingContext`` tokenize produced.
+    """
+    if not hasattr(tokenizer, "embedding_context"):
+        return tokenizer.featurizer.featurize(sequence)
+    context = tokenizer.embedding_context(
+        segment0["segment"], segment0["audio"], segment0["sample_rate"]
+    )
+    return tokenizer.featurizer.featurize(sequence, context=context)

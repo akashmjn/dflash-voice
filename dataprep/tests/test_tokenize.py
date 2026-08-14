@@ -52,6 +52,7 @@ def test_miso_channel_mask_follows_spans():
                 raises=NotImplementedError, reason="MPS conv1d output cap"
             )],
         ),
+        pytest.param("chatterbox", marks=pytest.mark.expensive),
         # Deprecated MLX backends: skipped by default, run with -m deprecated.
         pytest.param("qwen3", marks=pytest.mark.deprecated),
         pytest.param("fish", marks=pytest.mark.deprecated),
@@ -59,33 +60,9 @@ def test_miso_channel_mask_follows_spans():
 )
 def test_tokenize_segment0(segment0, model, expected_tokenized):
     expected = expected_tokenized[model]
-    sequence = tokenize_segment(segment0, load_tokenizer(model))
-    sequence.validate()
-
-    assert sequence.length == expected["length"]
-    assert sequence.layout == TokenizedSequenceLayout.from_dict(expected["layout"])
-    assert [(span.kind.value, span.start, span.end) for span in sequence.spans] == [
-        tuple(span) for span in expected["spans"]
-    ]
-    assert list(sequence.tokens.shape) == expected["tokens_shape"]
-
-    audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]
-    assert audio_span.end - audio_span.start == expected["audio_frames"]
-
-
-@pytest.mark.expensive
-def test_tokenize_segment0_chatterbox(segment0, expected_tokenized):
-    """Ids match the gold dumped from upstream chatterbox-flash.
-
-    ``fixtures/segment0/expected/chatterbox.json`` comes from the upstream
-    tokenizer rather than ``dataprep.chatterbox``, so it pins the ids
-    themselves, not just the layout we built around them.
-    """
-    pytest.importorskip("chatterbox", reason="needs the dataprep-chatterbox extra")
-    expected = expected_tokenized["chatterbox"]
-    tokenizer = load_tokenizer("chatterbox")
+    tokenizer = load_tokenizer(model)
     sequence = tokenize_segment(segment0, tokenizer)
-    sequence.validate(tokenizer.span_token_ranges)
+    sequence.validate(getattr(tokenizer, "span_token_ranges", None))
 
     assert sequence.length == expected["length"]
     assert sequence.layout == TokenizedSequenceLayout.from_dict(expected["layout"])
@@ -94,14 +71,18 @@ def test_tokenize_segment0_chatterbox(segment0, expected_tokenized):
     ]
     assert list(sequence.tokens.shape) == expected["tokens_shape"]
 
-    text_span = sequence.spans_of(TokenSpanKind.TEXT)[0]
     audio_span = sequence.spans_of(TokenSpanKind.AUDIO)[0]
     assert audio_span.end - audio_span.start == expected["audio_frames"]
-    assert (
-        sequence.tokens[text_span.start : text_span.end, -1].tolist()
-        == expected["text_tokens"]
-    )
-    assert (
-        sequence.tokens[audio_span.start : audio_span.end, 0].tolist()
-        == expected["speech_tokens"]
-    )
+
+    # Only chatterbox.json carries ids: dumped from the upstream tokenizer, so
+    # it pins the ids themselves and not just the layout built around them.
+    if "text_tokens" in expected:
+        text_span = sequence.spans_of(TokenSpanKind.TEXT)[0]
+        assert (
+            sequence.tokens[text_span.start : text_span.end, -1].tolist()
+            == expected["text_tokens"]
+        )
+        assert (
+            sequence.tokens[audio_span.start : audio_span.end, 0].tolist()
+            == expected["speech_tokens"]
+        )

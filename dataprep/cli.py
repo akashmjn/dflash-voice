@@ -54,33 +54,16 @@ MODELS = ("miso", "chatterbox", "qwen3", "fish")
 # so experiments/expresso_nll_entropy/ stays reproducible; warns on use.
 # See dataprep/mlx_backends/README.md.
 DEPRECATED_MODELS = ("qwen3", "fish")
-# Backends that build tokens but have no featurizer yet, so only
-# 'inspect --stage tokenize' can run.
-TOKENIZE_ONLY_MODELS = ("chatterbox",)
 STAGES = ("tokenize", "featurize", "all")
 
 MODEL_HELP = (
-    "tokenizer backend: miso, chatterbox (tokenize-only); "
-    "qwen3 / fish (deprecated, MLX-only)"
+    "tokenizer backend: miso, chatterbox; qwen3 / fish (deprecated, MLX-only)"
 )
 
 app = typer.Typer(
     add_completion=False,
     help="Prepare dataset rows into WebDataset shards for training.",
 )
-
-
-def _check_featurize_supported(model: str, *, what: str) -> None:
-    """Reject the paths that would reach a backend's missing featurizer.
-
-    Failing here gives a usage message naming the flag, rather than a
-    NotImplementedError from deep in the row loop after the model has loaded.
-    """
-    if model in TOKENIZE_ONLY_MODELS:
-        raise typer.BadParameter(
-            f"--model {model} is tokenize-only, so {what} is not supported yet. "
-            "Use: inspect --stage tokenize"
-        )
 
 
 def _check_model(model: str) -> None:
@@ -119,8 +102,6 @@ def inspect_command(
     _check_model(model)
     if stage not in STAGES:
         raise typer.BadParameter(f"stage must be one of {' / '.join(STAGES)}")
-    if stage in ("featurize", "all"):
-        _check_featurize_supported(model, what=f"--stage {stage}")
     if rows < 1:
         raise typer.BadParameter("--rows requires a positive row count")
 
@@ -215,7 +196,6 @@ def prepare_command(
     skipped rather than aborting the run.
     """
     _check_model(model)
-    _check_featurize_supported(model, what="'prepare'")
     if rows is not None and rows < 1:
         raise typer.BadParameter("--rows requires a positive row count")
 

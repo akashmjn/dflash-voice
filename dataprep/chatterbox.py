@@ -1,9 +1,10 @@
-"""Chatterbox tokenize backend, shared by Chatterbox AR and Chatterbox Flash.
+"""Chatterbox dataprep backend, shared by Chatterbox AR and Chatterbox Flash.
 
 ``ChatterboxFlashT3`` subclasses the upstream ``T3`` and differs only by an extra
 ``[MASK]`` row in ``speech_emb`` at id 8194 -- input-only, since ``speech_head``
 keeps its 8194 outputs. Ids, tokenizer and conditioning are identical, so one
-backend prepares data for both.
+backend tokenizes for both. Featurize teacher-forces the AR checkpoint; Flash's
+masked block-diffusion forward is not implemented.
 
 Unlike the RVQ backends, text and speech use separate vocabularies of the backbone
 read by separate heads, concatenated along one sequence rather than
@@ -32,6 +33,7 @@ from chatterbox.models.tokenizers import EnTokenizer
 from chatterbox.models.voice_encoder import VoiceEncoder
 
 from dataprep.common import (
+    FeaturizedSequence,
     Segment,
     SequenceEmbeddingContext,
     TokenSpanKind,
@@ -46,6 +48,10 @@ CHATTERBOX_REPO = "ResembleAI/chatterbox"
 S3GEN_FILENAME = "s3gen.safetensors"
 VE_FILENAME = "ve.safetensors"
 TOKENIZER_FILENAME = "tokenizer.json"
+T3_FILENAME = "t3_cfg.safetensors"
+
+#: Exaggeration scalar for the conditioning encoder; 0.5 is neutral.
+DEFAULT_EMOTION_ADV = 0.5
 
 #: T3's conditioning prefix width, containing audio prompt. The same length 
 #: for every utterance, containing: 1 speaker + 0 clap (unimplemented) 
@@ -234,14 +240,127 @@ class ChatterboxVoiceEncoder:
 
 
 class ChatterboxFeaturizer:
-    """Placeholder: this backend prepares tokens only."""
+    """Teacher-force the Chatterbox AR model over a whole utterance.
+
+    One causal pass over ``[cond | text | speech]`` sees exactly what incremental
+    decoding would. Only ``speech_head`` output is kept: ``T3``'s ``text_head``
+    is trained too, but ``FeaturizedSequence.logits`` is keyed by codebook and
+    Chatterbox has one, so text stays an input rather than a target.
+    """
 
     num_codebooks = 1
 
-    def featurize(self, sequence: TokenizedSequence, *, include_kv: bool = False):
-        raise NotImplementedError(
-            "chatterbox dataprep is tokenize-only; 'inspect --stage featurize' "
-            "and 'prepare' are not supported yet"
+    def __init__(
+        self,
+        model: Any | None = None,
+        *,
+        device: str | None = None,
+        repo_id: str = CHATTERBOX_REPO,
+        dtype: torch.dtype = torch.float32,
+    ):
+        self.device = _default_device(device)
+        self.repo_id = repo_id
+        self.dtype = dtype
+        self._model = model
+
+    def _load_model(self):
+        if self._model is None:
+            from chatterbox.models.t3.t3 import T3
+            from safetensors.torch import load_file
+
+            model = T3(T3Config.english_only())
+            state = load_file(str(_fetch(self.repo_id, T3_FILENAME)))
+            if "model" in state:  # some releases nest the module under 'model'
+                state = state["model"][0]
+            missing, unexpected = model.load_state_dict(state, strict=False)
+            if missing or unexpected:
+                raise ValueError(
+                    f"T3 weights did not match: {len(missing)} missing "
+                    f"{sorted(missing)[:3]}, {len(unexpected)} unexpected "
+                    f"{sorted(unexpected)[:3]}"
+                )
+            self._model = model.to(device=self.device, dtype=self.dtype).eval()
+        return self._model
+
+    def featurize(
+        self,
+        sequence: TokenizedSequence,
+        *,
+        include_kv: bool = False,
+        context: SequenceEmbeddingContext | None = None,
+    ) -> FeaturizedSequence:
+        """Teacher-forced forward pass: feature ``t`` predicts ``tokens[t+1]``."""
+        if include_kv:
+            raise NotImplementedError(
+                "Chatterbox teacher-forced KV export is not implemented yet"
+            )
+        if context is None or "speaker_emb" not in context:
+            raise ValueError(
+                "Chatterbox featurize needs the 'speaker_emb' embedding context "
+                "written by tokenize; re-run the tokenize stage if it is missing"
+            )
+
+        from chatterbox.models.t3.modules.cond_enc import T3Cond
+
+        model = self._load_model()
+        hp = model.hp
+        device, dtype = self.device, self.dtype
+
+        tokens = torch.as_tensor(sequence.tokens, dtype=torch.long)
+        spans = {span.kind: span for span in sequence.spans}
+        try:
+            text_start = spans[TokenSpanKind.BOS_TEXT].start
+            text_end = spans[TokenSpanKind.EOS_TEXT].end
+            speech_start = spans[TokenSpanKind.BOS_AUDIO].start
+            audio = spans[TokenSpanKind.AUDIO]
+            speech_end = spans[TokenSpanKind.EOS_AUDIO].end
+        except KeyError as exc:
+            raise ValueError(f"Chatterbox sequence is missing a {exc} span") from None
+
+        text_tokens = tokens[text_start:text_end, -1].unsqueeze(0).to(device)
+        speech_tokens = tokens[speech_start:speech_end, 0].unsqueeze(0).to(device)
+
+        # Prompt is the utterance's own leading audio, capped at the conditioned
+        # length -- a view of tokens the sequence already holds, so not stored.
+        prompt = tokens[audio.start : audio.start + hp.speech_cond_prompt_len, 0]
+        cond = T3Cond(
+            speaker_emb=torch.as_tensor(context["speaker_emb"], dtype=dtype)
+            .view(1, -1)
+            .to(device),
+            cond_prompt_speech_tokens=prompt.unsqueeze(0).to(device),
+            emotion_adv=DEFAULT_EMOTION_ADV * torch.ones(1, 1, 1, dtype=dtype, device=device),
+        )
+
+        with torch.inference_mode():
+            cond_emb = model.prepare_conditioning(cond)
+            text_emb = model.text_emb(text_tokens) + model.text_pos_emb(text_tokens)
+            # LearnedPositionEmbeddings numbers from 0 off the tensor it is
+            # handed, so the whole stream must be embedded at once.
+            speech_emb = model.speech_emb(speech_tokens) + model.speech_pos_emb(
+                speech_tokens
+            )
+            embeds = torch.cat(
+                [cond_emb, text_emb.to(dtype), speech_emb.to(dtype)], dim=1
+            )
+            if embeds.shape[1] != sequence.length:
+                raise ValueError(
+                    f"Built {embeds.shape[1]} input frames for a {sequence.length}-frame "
+                    f"sequence; COND_PREFIX_LEN ({COND_PREFIX_LEN}) no longer matches "
+                    f"the model's conditioning width"
+                )
+            hidden = model.tfmr(
+                inputs_embeds=embeds, use_cache=False, return_dict=True
+            ).last_hidden_state[0]
+            # tokens[L-1] is never an input, so features cover tokens[0..L-2].
+            hidden = hidden[:-1].clone()
+            logits = model.speech_head(hidden)
+
+        return FeaturizedSequence(
+            logits={0: logits.cpu().float()},
+            hiddens=hidden.cpu().float(),
+            spans=list(sequence.spans),
+            layout=sequence.layout,
+            padding=sequence.padding,
         )
 
 
@@ -272,7 +391,9 @@ class ChatterboxTokenizer:
         self.text_tokenizer = text_tokenizer or EnTokenizer(
             str(_fetch(model_id, TOKENIZER_FILENAME))
         )
-        self.featurizer = featurizer or ChatterboxFeaturizer()
+        self.featurizer = featurizer or ChatterboxFeaturizer(
+            device=device, repo_id=model_id
+        )
         self._normalize_text = self._resolve_normalizer(normalize_text)
         # Coarse bound only; the two real limits are enforced separately below.
         self.max_seq_length = self.hp.max_text_tokens + self.hp.max_speech_tokens

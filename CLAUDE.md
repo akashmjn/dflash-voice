@@ -76,7 +76,7 @@ data/
 ```bash
 uv pip install -e ".[dataprep-mlx]"        # deprecated Qwen3 / Fish dataprep + MLX inference
 uv pip install -e ".[dataprep-miso]"       # Miso dataprep (needs MisoTTS package)
-uv pip install -e ".[dataprep-chatterbox]" # Chatterbox AR + Flash dataprep (tokenize only)
+uv pip install -e ".[dataprep-chatterbox]" # Chatterbox AR + Flash dataprep
 uv pip install -e ".[mlx_decode]"          # MLX inference/benchmarking only
 uv pip install -e ".[dev]"                 # pytest, modal
 ```

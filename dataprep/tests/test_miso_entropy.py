@@ -11,6 +11,7 @@ def _entropy(logits):
 
 
 @pytest.mark.expensive
+@pytest.mark.backend("miso")
 def test_miso_entropy_matches_fixture(segment0, miso_entropy_reference):
     from dataprep.pipeline import load_tokenizer
 

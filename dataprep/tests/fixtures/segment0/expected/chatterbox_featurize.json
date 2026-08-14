@@ -1,0 +1,31 @@
+{
+  "sequence_length": 792,
+  "pred_slice_len": 594,
+  "hidden_dim": 1024,
+  "logit_dim0": 8194,
+  "num_logits": 1,
+  "nll_frames": 594,
+  "codebook_nll_nats": [
+    3.959511
+  ],
+  "codebook_entropy_nats": [
+    3.888433
+  ],
+  "nll_summary": {
+    "semantic": {
+      "avg_nll_per_codebook": 3.9595112800598145,
+      "num_codebooks": 1,
+      "kbits_per_second": 0.14280918220215513
+    },
+    "audio": {
+      "avg_nll_per_codebook": 0.0,
+      "num_codebooks": 0,
+      "kbits_per_second": 0.0
+    },
+    "total": {
+      "avg_nll_per_codebook": 3.9595112800598145,
+      "num_codebooks": 1,
+      "kbits_per_second": 0.14280918220215513
+    }
+  }
+}

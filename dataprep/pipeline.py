@@ -10,6 +10,7 @@ Library module: the command line lives in ``dataprep.cli``.
 
 from __future__ import annotations
 
+import inspect
 import json
 import traceback
 import warnings
@@ -91,8 +92,6 @@ def load_tokenizer(
         )
 
     if model == "chatterbox":
-        # Tokenize-only: the featurizer is a stub, so 'prepare' and
-        # '--stage featurize' are rejected in dataprep.cli rather than here.
         from dataprep.chatterbox import CHATTERBOX_REPO, ChatterboxTokenizer
 
         if bucket_frames:
@@ -372,7 +371,7 @@ def stream_prepared_samples(
             continue
         audio = example.audio
         try:
-            sequences, _, _ = tokenize_example(
+            sequences, _, contexts = tokenize_example(
                 example,
                 audio,
                 tokenizer=tokenizer,
@@ -383,12 +382,20 @@ def stream_prepared_samples(
             log_failure(log_root, stage="tokenize", row=row, exc=exc)
             continue
 
-        for sequence in tqdm(
-            sequences, desc=f"row {row} featurize", unit="seq", leave=False
+        for sequence, context in tqdm(
+            list(zip(sequences, contexts)),
+            desc=f"row {row} featurize",
+            unit="seq",
+            leave=False,
         ):
             seq_id = sequence.seq_id
             try:
-                feature = tokenizer.featurizer.featurize(sequence, include_kv=include_kv)
+                feature = _featurize(
+                    tokenizer.featurizer,
+                    sequence,
+                    include_kv=include_kv,
+                    context=context,
+                )
                 feature.validate(sequence_length=sequence.length)
                 sample = build_sample(
                     sequence,
@@ -405,6 +412,14 @@ def stream_prepared_samples(
                 continue
             if sample is not None:
                 yield sample
+
+
+def _featurize(featurizer, sequence, *, include_kv: bool, context):
+    """Pass ``context`` only to backends that take it -- Chatterbox needs its
+    precomputed speaker embedding; the rest condition on tokens alone."""
+    if "context" in inspect.signature(featurizer.featurize).parameters:
+        return featurizer.featurize(sequence, include_kv=include_kv, context=context)
+    return featurizer.featurize(sequence, include_kv=include_kv)
 
 
 def tokenize_row(
@@ -472,14 +487,22 @@ def featurize_row(
 ) -> Path:
     input_dir = Path(data_root) / dataset / "tokenized" / model / str(row)
     sequences, source_metadata = TokenizedSequence.load_all(input_dir)
+    contexts = SequenceEmbeddingContext.load_all(input_dir, count=len(sequences))
     tqdm.write(
         f"Featurizing row {row}: {len(sequences)} sequence(s)"
         + (" with KV cache" if dump_kv else "")
     )
     features = []
-    for sequence in tqdm(sequences, desc=f"row {row} featurize", unit="seq", leave=False):
+    for sequence, context in tqdm(
+        list(zip(sequences, contexts)),
+        desc=f"row {row} featurize",
+        unit="seq",
+        leave=False,
+    ):
         try:
-            feature = featurizer.featurize(sequence, include_kv=dump_kv)
+            feature = _featurize(
+                featurizer, sequence, include_kv=dump_kv, context=context
+            )
             feature.validate(sequence_length=sequence.length)
         except Exception as exc:
             log_failure(log_root, stage="featurize", row=row, exc=exc)

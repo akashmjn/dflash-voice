@@ -123,19 +123,24 @@ environment:
 ```bash
 uv pip install -e ".[dataprep-mlx]"         # deprecated Qwen3 / Fish backends
 uv pip install -e ".[dataprep-miso]"        # Miso (replaces the pins above)
-uv pip install -e ".[dataprep-chatterbox]"  # Chatterbox AR + Flash (tokenize only)
+uv pip install -e ".[dataprep-chatterbox]"  # Chatterbox AR + Flash
 uv pip install -e ../MisoTTS                # to use a locally cloned MisoTTS
 ```
 
-## Chatterbox backend (tokenize only)
+## Chatterbox backend
 
 Prepares finetuning data for both Chatterbox AR (500M English) and Chatterbox Flash, which share a
 tokenizer — Flash subclasses the same `T3` and differs only by an input-only `[MASK]` embedding row.
-There is no featurizer yet, so `prepare` and `--stage featurize` are rejected up front:
 
 ```bash
-python -m dataprep.cli inspect --model chatterbox --rows 3 --stage tokenize
+python -m dataprep.cli inspect --model chatterbox --rows 3 --stage all
 ```
+
+Featurize teacher-forces the **AR** checkpoint (`t3_cfg.safetensors`) in one causal pass over the
+whole utterance, which sees exactly what incremental decoding would. Only `speech_head` output is
+stored — `FeaturizedSequence.logits` is keyed by codebook and Chatterbox has one, so the (trained)
+`text_head` has no slot and text stays an input. Flash's masked block-diffusion forward is not wired
+up.
 
 Unlike the RVQ backends, Chatterbox is two-stream: one S3 codebook (25 Hz, vocab 6561) plus a
 separate text vocabulary, laid out as `[cond | SOT text EOT | SOS y EOS]` with speech in column 0 and
