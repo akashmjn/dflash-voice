@@ -14,7 +14,7 @@ batch driver plus the record shaping that `metrics_explore.py` charts.
 
 ```bash
 cd experiments/expresso_nll_entropy
-python model_metrics.py compute --model fish
+python model_metrics.py compute --model miso
 python model_metrics.py summarize --rows 3
 ```
 
@@ -34,9 +34,8 @@ import typer
 from dataprep.common import (
     NATS_TO_BITS,
     FeaturizedSequence,
-    SpanKind,
     TokenizedSequence,
-    _as_numpy,
+    TokenSpanKind,
     audio_frame_metrics,
     nll_summary,
 )
@@ -45,7 +44,7 @@ from dataprep.expresso import DATASET_NAME
 # Anchor to the repo-root `data/` dir so the default holds no matter the cwd
 # (this file lives at <repo>/experiments/expresso_nll_entropy/model_metrics.py).
 DEFAULT_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
-MODELS = ("miso", "qwen3", "fish")
+MODELS = ("miso", "chatterbox", "qwen3", "fish")
 
 app = typer.Typer(
     add_completion=False,
@@ -57,11 +56,17 @@ def group_entropy_bits(entropy_bits: np.ndarray, mid: int) -> dict[str, np.ndarr
     """Per-frame entropy (bits) for each codebook group: ``{label: (frames,)}``.
 
     ``semantic`` is codebook 0; the remaining codebooks split into two halves.
+    Empty groups are dropped -- averaging them would emit all-NaN series.
     """
-    return {
+    groups = {
         "semantic": entropy_bits[:, 0],
-        "audio_half_1": entropy_bits[:, 1 : mid + 1].mean(axis=1),
-        "audio_half_2": entropy_bits[:, mid + 1 :].mean(axis=1),
+        "audio_half_1": entropy_bits[:, 1 : mid + 1],
+        "audio_half_2": entropy_bits[:, mid + 1 :],
+    }
+    return {
+        label: series if series.ndim == 1 else series.mean(axis=1)
+        for label, series in groups.items()
+        if series.ndim == 1 or series.shape[1]
     }
 
 
@@ -103,6 +108,7 @@ def nll_breakdown_records(
     from :func:`nll_summary` followed by one row per codebook.
     ``avg_nll_per_codebook`` is always per codebook, so group and codebook rows
     read on the same scale; ``share_pct`` is the row's share of the total bitrate.
+    Groups holding no codebooks are omitted.
     """
     summary = nll_summary(nll, frame_rate)
     total_kbits = summary["total"]["kbits_per_second"]
@@ -120,6 +126,7 @@ def nll_breakdown_records(
             "share_pct": share(values["kbits_per_second"]),
         }
         for name, values in summary.items()
+        if values["num_codebooks"]
     ]
     records.extend(
         {
@@ -189,7 +196,7 @@ def compute_row_metrics(
                         "start": span.start,
                         "end": span.end,
                     }
-                    for span in features.spans_of(SpanKind.AUDIO)
+                    for span in features.spans_of(TokenSpanKind.AUDIO)
                 ],
             }
         )
@@ -228,13 +235,16 @@ def compute_row_metrics(
     )
 
     # Mirrors the notebook/README table: kbit/s with the avg NLL per codebook.
+    reported = {
+        name: values for name, values in summary.items() if values["num_codebooks"]
+    }
     print(
         f"{model} row {row}: {len(entropy):,} frames @ {frame_rate:g} Hz, "
         f"{num_codebooks} codebooks | "
         + " | ".join(
             f"{name} {values['kbits_per_second']:.3f} kbit/s "
             f"({values['avg_nll_per_codebook']:.2f} avg nll/codebook)"
-            for name, values in summary.items()
+            for name, values in reported.items()
         )
         + f" -> {metrics_dir}"
     )
@@ -307,19 +317,34 @@ def summary_table(summaries: list[dict[str, Any]]) -> str:
     Cells are space-padded to a fixed per-column width so the table lines up when
     printed to a terminal; it still parses as GitHub-flavored markdown.
     """
-    rows = [
-        [
+    def cells(item: dict[str, Any]) -> list[str]:
+        summary = item["nll_summary"]
+        # `nll_summary` splits positionally ([:1] semantic, [1:] audio), assuming
+        # an RVQ stack. Chatterbox's single FSQ codebook has no residual half, so
+        # its audio cells are blank and its semantic cells match the totals.
+        audio = (
+            ["—", "—"]
+            if item["num_codebooks"] <= 1
+            else [
+                f"{summary['audio']['avg_nll_per_codebook']:.2f}",
+                f"{summary['audio']['kbits_per_second']:.3f}",
+            ]
+        )
+        groups = [
+            f"{summary['semantic']['avg_nll_per_codebook']:.2f}",
+            audio[0],
+            f"{summary['semantic']['kbits_per_second']:.3f}",
+            audio[1],
+        ]
+        return [
             item["model"],
             str(item["num_codebooks"]),
             f"{item['frame_rate']:g}",
-            f"{item['nll_summary']['semantic']['avg_nll_per_codebook']:.2f}",
-            f"{item['nll_summary']['audio']['avg_nll_per_codebook']:.2f}",
-            f"{item['nll_summary']['semantic']['kbits_per_second']:.3f}",
-            f"{item['nll_summary']['audio']['kbits_per_second']:.3f}",
-            f"{item['nll_summary']['total']['kbits_per_second']:.3f}",
+            *groups,
+            f"{summary['total']['kbits_per_second']:.3f}",
         ]
-        for item in summaries
-    ]
+
+    rows = [cells(item) for item in summaries]
     widths = [
         max(len(name), *(len(row[index]) for row in rows)) if rows else len(name)
         for index, name in enumerate(SUMMARY_COLUMNS)
