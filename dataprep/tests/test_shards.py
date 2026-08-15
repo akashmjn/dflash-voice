@@ -3,7 +3,6 @@
 Tests that the exported shards faithfully reproduce the original PT artifacts:
 - targets match original tokens at the audio span
 - hiddens (after fp16 round-trip) are close to the original stored hiddens
-- FramePackingIterableDataset yields correct shapes and dtypes
 - NLL computed from stored logits matches saved metrics JSON
 
 These tests are non-expensive: they read from already-featurized data in
@@ -450,39 +449,6 @@ def test_nll_parity_with_saved_metrics(row):
             assert abs(actual - expected) < 1e-2, (
                 f"Row {row} {group}.{unit}: got {actual:.6f}, expected {expected:.6f}"
             )
-
-
-# ---------------------------------------------------------------------------
-# 4. FramePackingIterableDataset smoke test
-# ---------------------------------------------------------------------------
-
-def test_frame_packing_dataset(wds_root):
-    """Dataset yields correctly shaped, typed batches; semantic == targets[:, 0]."""
-    from train.dataset import FramePackingIterableDataset
-
-    train_dir = wds_root / "train"
-    if not any(train_dir.glob("*.tar")):
-        pytest.skip("No train shards")
-
-    batch_frames = 64
-    ds = FramePackingIterableDataset(
-        train_dir, batch_frames=batch_frames, eval_mode=True
-    )
-
-    batches_seen = 0
-    for batch in ds:
-        assert batch["hiddens"].shape == (batch_frames, 4096), batch["hiddens"].shape
-        assert batch["targets"].shape == (batch_frames, 32), batch["targets"].shape
-        assert batch["semantic"].shape == (batch_frames,), batch["semantic"].shape
-        assert batch["hiddens"].dtype == torch.float32
-        assert batch["targets"].dtype == torch.int64
-        assert batch["semantic"].dtype == torch.int64
-        torch.testing.assert_close(batch["semantic"], batch["targets"][:, 0])
-        batches_seen += 1
-        if batches_seen >= 3:
-            break
-
-    assert batches_seen >= 1, "Dataset yielded no batches"
 
 
 def test_sample_order_is_deterministic(wds_root):

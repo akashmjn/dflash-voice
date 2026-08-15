@@ -17,7 +17,7 @@ The yielded dict has:
 
 Usage::
 
-  from train.dataset import FramePackingIterableDataset
+  from train.rvq_decoder.dataset import FramePackingIterableDataset
   ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train", batch_frames=2048)
   # OR  ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train/miso_train_{00000..00012}.tar", batch_frames=2048)
 
@@ -212,6 +212,11 @@ def _resolve_shard_urls(source) -> str | list[str]:
 
     path = Path(source)
     if not path.is_dir():
+        # A brace/glob pattern or a single tar is the caller's business; a plain
+        # path that simply is not there is a typo worth catching before the
+        # model loads, rather than a webdataset error several seconds later.
+        if path.suffix != ".tar" and not any(c in str(source) for c in "{*?["):
+            raise FileNotFoundError(f"no shard directory at {source}")
         return str(source)
 
     shards = sorted(str(p) for p in path.glob("*.tar"))

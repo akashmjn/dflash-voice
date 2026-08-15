@@ -29,7 +29,8 @@ dflash-voice/
 │   ├── expresso_nll_entropy/    NLL/entropy analysis (marimo notebooks)
 │   └── mlx_decode_breakdown/    decode-time breakdown writeup
 ├── demo/                  two-speaker podcast demo (mlx-audio APIs directly)
-├── train/                 depth-decoder training — dev branch only, empty on main
+├── train/                 TTS finetuning — dev branch only, empty on main
+│   └── rvq_decoder/         unmaintained Miso depth-decoder experiment
 ├── agent-workspace/       gitignored scratch space for agents (see Agent workflow)
 ├── data/                  gitignored dataprep input/output artifacts (see below)
 └── tmp/                   gitignored scratch outputs
@@ -128,7 +129,7 @@ changes. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample strea
 
 **demo/** — `demo_tts_podcast.py` uses mlx-audio's native APIs directly (not `mlx_decode`). Only `miso` supports cross-turn context; `--model fish` is not wired up (no `Segment`/context equivalent yet).
 
-**train/** (dev branch only) — depth-decoder training (`cli.py`, `dataset.py`, `model.py`, `convert.py`; `MisoRVQDepthDecoder` + WebDataset dataloader + NLL eval). Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
+**train/** (dev branch only) — the training track, now aimed at Chatterbox-Flash TTS finetuning. Currently everything under it is `rvq_decoder/`, the earlier Miso depth-decoder experiment (`model.py`, `convert.py`, `train.py`, `cli.py`, `dataset.py`; `MisoRVQDepthDecoder` + converter + NLL eval + a wall-clock trainer) — unmaintained and kept for reference, including its `FramePackingIterableDataset` (frame-level geometry, not sequences — see `train/rvq_decoder/__init__.py`). Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
 
 ## Agent workflow
 

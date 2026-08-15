@@ -1,4 +1,4 @@
-"""Map published Miso checkpoint weights onto ``train.model.MisoRVQDepthDecoder``.
+"""Map published Miso checkpoint weights onto ``train.rvq_decoder.model.MisoRVQDepthDecoder``.
 
 The checkpoint was produced by torchtune's ``llama3_2`` builder, so it differs
 from HF Llama in two ways:
