@@ -1,14 +1,19 @@
-"""Run `dataprep.cli prepare` on a Modal GPU and sync WebDataset shards to HF bucket.
+"""Run `dataprep.cli prepare` over ~10h of Emilia on a Modal GPU, sync to HF bucket.
 
-Final throughput and timings are reported per phase (weights / prepare / sync);
-Expresso dataset used is ~30h for small scale testing.
+A scale test for the Emilia loader before committing to the ~100h run: same
+pipeline as the Expresso app, different source. Timings are reported per phase
+(weights / prepare / sync).
 
-`--rows` caps utterances, not source rows -- the Expresso loader cuts each
-multi-turn row into one segment per turn.
+Size comes from the tar glob, not `--rows`: one EN tar is ~1.7h across ~37
+speakers, so six tars is roughly 10h with enough speakers for the train/val
+split to mean something. `--rows` stays available to cut a run short.
 
-    modal run modal_apps/dataprep/cbox-expresso30h-shards.py --rows 10
-    modal run modal_apps/dataprep/cbox-expresso30h-shards.py --rows 0    # full dataset
-    modal run modal_apps/dataprep/cbox-expresso30h-shards.py --no-sync
+`amphion/Emilia-Dataset` is gated -- the `hf-modal-0814` secret must carry an
+HF_TOKEN with access, or `load_dataset` fails on auth.
+
+    modal run modal_apps/dataprep/cbox-emilia10h-shards.py --rows 10   # smoke test
+    modal run modal_apps/dataprep/cbox-emilia10h-shards.py             # the full ~10h
+    modal run modal_apps/dataprep/cbox-emilia10h-shards.py --no-sync
 """
 
 from __future__ import annotations
@@ -29,8 +34,12 @@ DEFAULT_GPU = "T4:1"
 MINUTES = 90
 
 MODEL = "chatterbox"
-DATASET = "expresso"
-DEFAULT_SLUG = "expresso-cbox"
+DATASET = "emilia"
+DEFAULT_SLUG = "emilia10h-cbox"
+
+#: Six EN tars at ~1.7h each. Tar names carry six digits (EN-B000000), so the
+#: bracket sits in the last one; `EN-B0000[0-5]*.tar` is 60 tars (~100h).
+DATA_FILES = "Emilia/EN/EN-B00000[0-5].tar"
 
 REMOTE_ROOT = "/root/repo"
 DATA_ROOT = f"{REMOTE_ROOT}/data"
@@ -51,7 +60,7 @@ image = (
     .add_local_dir(REPO_ROOT / "dataprep", f"{REMOTE_ROOT}/dataprep")
 )
 
-app = modal.App("cbox-dataprep-shards-0814")
+app = modal.App("cbox-emilia10h-shards-0815")
 
 # ~2GB of Chatterbox weights; only the first run pays the download.
 hf_cache = modal.Volume.from_name("cbox-hf-cache-0814", create_if_missing=True)
@@ -65,14 +74,15 @@ hf_cache = modal.Volume.from_name("cbox-hf-cache-0814", create_if_missing=True)
     timeout=4 * 60 * MINUTES,
 )
 def prepare_shards(
-    rows: int = 10,
+    rows: int = 0,
+    data_files: str = DATA_FILES,
     slug: str | None = None,
     sync: bool = True,
 ) -> dict:
     import subprocess
     import sys
 
-    # rows <= 0 drops --rows, which is how the CLI streams the whole dataset.
+    # rows <= 0 drops --rows, so the glob alone decides the size.
     limit = rows if rows > 0 else None
     resolved_slug = slug or (
         f"{DEFAULT_SLUG}-rows{limit}" if limit else f"{DEFAULT_SLUG}-full"
@@ -103,9 +113,8 @@ def prepare_shards(
     cmd = [
         sys.executable, "-m", "dataprep.cli", "prepare",
         "--model", MODEL,
-        # --dataset now picks the loader, and defaults to emilia; without this
-        # the app would silently prepare the wrong dataset.
         "--dataset", DATASET,
+        "--data-files", data_files,
         "--slug", resolved_slug,
         "--data-root", DATA_ROOT,
         "--device", "cuda",
@@ -124,13 +133,20 @@ def prepare_shards(
 
     shard_bytes = sum(p.stat().st_size for p in shard_dir.rglob("*.tar") if p.is_file())
 
-    # --rows caps utterances, not HF rows: the Expresso loader cuts each
-    # multi-turn row into one segment per turn, and each is one sequence.
+    # One Emilia row is one utterance is one sequence, so sequences tracks
+    # utterances directly; frames are tokenized at the codec's rate.
     info = json.loads((shard_dir / "dataset_info.json").read_text(encoding="utf-8"))
     train_frames = info["total_train_frames"]
     val_frames = info["total_val_frames"]
     total_frames = train_frames + val_frames
     total_sequences = info["total_train_sequences"] + info["total_val_sequences"]
+
+    failures = pathlib.Path(DATA_ROOT) / "dataprep_logs" / "failures.jsonl"
+    failure_count = (
+        sum(1 for line in failures.read_text(encoding="utf-8").splitlines() if line.strip())
+        if failures.exists()
+        else 0
+    )
 
     sync_s = 0.0
     if sync:
@@ -144,12 +160,14 @@ def prepare_shards(
 
     stats = {
         "rows": limit,
+        "data_files": data_files,
         "slug": resolved_slug,
         "gpu": torch.cuda.get_device_name(0),
         "sequences": total_sequences,
         "frames": total_frames,
         "train_frames": train_frames,
         "val_frames": val_frames,
+        "failures": failure_count,
         "weights_s": round(weights_s, 1),
         "prepare_s": round(prepare_s, 1),
         "sync_s": round(sync_s, 1),
@@ -160,17 +178,22 @@ def prepare_shards(
     print("\n=== timings")
     for key, value in stats.items():
         print(f"{key:14s}: {value}")
+    if not val_frames:
+        print("\nWARNING: val split is empty -- too few distinct speakers")
+    if failure_count:
+        print(f"WARNING: {failure_count} utterances failed, see {failures}")
     return stats
 
 
 @app.local_entrypoint()
 def main(
-    rows: int = 10,  # 0 or less streams the full dataset
+    rows: int = 0,  # 0 or less lets the tar glob decide the size
+    data_files: str = DATA_FILES,
     slug: str | None = None,
     sync: bool = True,
 ):
     stats = prepare_shards.remote(
-        rows=rows, slug=slug, sync=sync
+        rows=rows, data_files=data_files, slug=slug, sync=sync
     )
     if sync:
         print(f"\nhttps://huggingface.co/buckets/{BUCKET}")
