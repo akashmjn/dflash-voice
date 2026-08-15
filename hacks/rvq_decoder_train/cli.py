@@ -1,8 +1,8 @@
 """Convert, train, and score the Miso depth decoder. Unmaintained -- see __init__.
 
-    python -m train.rvq_decoder.cli convert
-    python -m train.rvq_decoder.cli eval --checkpoint tmp/miso_depth_decoder.safetensors
-    python -m train.rvq_decoder.cli train --preset smoke --minutes 5
+    python cli.py convert
+    python cli.py eval --checkpoint tmp/miso_depth_decoder.safetensors
+    python cli.py train --preset smoke --minutes 5
 
 Random init lands near ln(2051) = 7.63 nats; the checkpoint near 4.26 nats /
 2.38 kbit/s over codebooks 1..31. Stuck near 7.6 means the converter
@@ -50,8 +50,8 @@ def load_model(checkpoint: Path | None, *, seed: int = 0, device=None):
     """
     from safetensors.torch import load_file
 
-    from train.rvq_decoder.convert import convert_miso_decoder_state_dict, decoder_source_keys
-    from train.rvq_decoder.model import MisoRVQDepthDecoder
+    from convert import convert_miso_decoder_state_dict, decoder_source_keys
+    from model import MisoRVQDepthDecoder
 
     torch.manual_seed(seed)
     model = MisoRVQDepthDecoder()
@@ -87,8 +87,8 @@ def evaluate_nll(
     """Frame-weighted mean NLL over codebooks 1..K-1 of a single pass."""
     from tqdm import tqdm
 
-    from train.rvq_decoder.dataset import FramePackingIterableDataset
-    from train.rvq_decoder.model import codebook_nll
+    from dataset import FramePackingIterableDataset
+    from model import codebook_nll
 
     dev = resolve_device(device)
 
@@ -165,7 +165,7 @@ def convert_command(
     """
     from safetensors.torch import save_file
 
-    from train.rvq_decoder.convert import BF16_REPO, load_miso_decoder_state_dict
+    from convert import BF16_REPO, load_miso_decoder_state_dict
 
     if output.exists() and not force:
         raise typer.BadParameter(f"{output} exists; pass --force to overwrite")
@@ -230,8 +230,8 @@ def train_command(
     quiet: bool = typer.Option(False, "--quiet", "-q", help="suppress the progress bar"),
 ) -> None:
     """Train the depth decoder for a fixed time, then score the val split."""
-    from train.rvq_decoder.model import DepthDecoderConfig
-    from train.rvq_decoder.train import run_train, smoke_config
+    from model import DepthDecoderConfig
+    from trainer import run_train, smoke_config
 
     if preset not in ("smoke", "full"):
         raise typer.BadParameter("preset must be 'smoke' or 'full'")

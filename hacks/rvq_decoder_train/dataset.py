@@ -17,7 +17,7 @@ The yielded dict has:
 
 Usage::
 
-  from train.rvq_decoder.dataset import FramePackingIterableDataset
+  from dataset import FramePackingIterableDataset
   ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train", batch_frames=2048)
   # OR  ds = FramePackingIterableDataset("data/sharded_wds/DATASET/train/miso_train_{00000..00012}.tar", batch_frames=2048)
 

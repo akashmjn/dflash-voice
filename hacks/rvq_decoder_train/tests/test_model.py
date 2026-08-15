@@ -12,7 +12,7 @@ def test_forward_shapes_and_near_chance_at_init():
     confidently wrong on random targets. Being near chance and not below it is
     the point.
     """
-    from train.rvq_decoder.model import MisoRVQDepthDecoder, loss_fn, uniform_nll
+    from model import MisoRVQDepthDecoder, loss_fn, uniform_nll
 
     torch.manual_seed(0)
     model = MisoRVQDepthDecoder().eval()
@@ -34,8 +34,11 @@ def test_causal_along_codebook_axis():
 
     Bidirectional attention here would leak later codebooks into earlier ones
     and silently *improve* NLL.
+
+    Seen failing intermittently with a handful of nan logits; suspected bad
+    hparams in the default config rather than a mask bug, but unconfirmed.
     """
-    from train.rvq_decoder.model import MisoRVQDepthDecoder
+    from model import MisoRVQDepthDecoder
 
     torch.manual_seed(0)
     model = MisoRVQDepthDecoder().eval()

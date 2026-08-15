@@ -30,7 +30,8 @@ dflash-voice/
 │   └── mlx_decode_breakdown/    decode-time breakdown writeup
 ├── demo/                  two-speaker podcast demo (mlx-audio APIs directly)
 ├── train/                 TTS finetuning — dev branch only, empty on main
-│   └── rvq_decoder/         unmaintained Miso depth-decoder experiment
+├── hacks/                 unmaintained experiments, not packaged
+│   └── rvq_decoder_train/   Miso depth-decoder experiment (see its README)
 ├── agent-workspace/       gitignored scratch space for agents (see Agent workflow)
 ├── data/                  gitignored dataprep input/output artifacts (see below)
 └── tmp/                   gitignored scratch outputs
@@ -129,7 +130,9 @@ changes. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample strea
 
 **demo/** — `demo_tts_podcast.py` uses mlx-audio's native APIs directly (not `mlx_decode`). Only `miso` supports cross-turn context; `--model fish` is not wired up (no `Segment`/context equivalent yet).
 
-**train/** (dev branch only) — the training track, now aimed at Chatterbox-Flash TTS finetuning. Currently everything under it is `rvq_decoder/`, the earlier Miso depth-decoder experiment (`model.py`, `convert.py`, `train.py`, `cli.py`, `dataset.py`; `MisoRVQDepthDecoder` + converter + NLL eval + a wall-clock trainer) — unmaintained and kept for reference, including its `FramePackingIterableDataset` (frame-level geometry, not sequences — see `train/rvq_decoder/__init__.py`). Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
+**train/** (dev branch only) — the training track, aimed at Chatterbox-Flash TTS finetuning. Currently an empty package. Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
+
+**hacks/** — unmaintained experiments, deliberately not a package and not covered by `[tool.setuptools.packages.find]`. `rvq_decoder_train/` is the earlier Miso depth-decoder experiment (`MisoRVQDepthDecoder` + converter + NLL eval + a wall-clock trainer), including its `FramePackingIterableDataset` (frame-level geometry, not sequences). Modules import each other as siblings, so run it from its own directory rather than as `python -m` — see `hacks/rvq_decoder_train/README.md`.
 
 ## Agent workflow
 

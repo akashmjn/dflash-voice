@@ -16,7 +16,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 include = ["mlx_decode*", "dataprep*", "train*"]
-exclude = ["mlx_decode.tests*", "dataprep.tests*", "train.tests*", "train.rvq_decoder.tests*"]
+exclude = ["mlx_decode.tests*", "dataprep.tests*", "train.tests*"]
 
 [project.optional-dependencies]
 

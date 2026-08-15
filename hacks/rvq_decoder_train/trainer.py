@@ -29,7 +29,7 @@ from pathlib import Path
 
 import torch
 
-from train.rvq_decoder.model import DepthDecoderConfig, MisoRVQDepthDecoder, codebook_nll, loss_fn
+from model import DepthDecoderConfig, MisoRVQDepthDecoder, codebook_nll, loss_fn
 
 DEFAULT_FRAME_RATE = 12.5
 NATS_TO_BITS = 1.0 / math.log(2.0)
@@ -95,7 +95,7 @@ def evaluate(model, source, *, batch_frames: int, device, num_codebooks: int) ->
 
     Mirrors ``cli.evaluate_nll``.
     """
-    from train.rvq_decoder.dataset import FramePackingIterableDataset
+    from dataset import FramePackingIterableDataset
 
     was_training = model.training
     model.eval()
@@ -154,7 +154,7 @@ def run_train(
     from safetensors.torch import save_file
     from tqdm import tqdm
 
-    from train.rvq_decoder.dataset import FramePackingIterableDataset
+    from dataset import FramePackingIterableDataset
 
     cfg = config or smoke_config()
     dev = resolve_device(device)
