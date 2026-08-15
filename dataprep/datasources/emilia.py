@@ -29,8 +29,12 @@ from dataprep.common import Segment
 
 DEFAULT_DATASET = "amphion/Emilia-Dataset"
 
-#: All English tars (~1140 of them). Narrow it to size a run: one tar is ~1.7h,
-#: so ``Emilia/EN/EN-B0000[0-5]*.tar`` is roughly 100h.
+#: All English tars (1140 in ``Emilia/EN``, 1362 in ``Emilia-YODAS/EN``).
+#:
+#: The glob picks language and subset, not size -- one EN tar already holds ~68h
+#: across ~25k utterances, so size a run with ``limit``. Names carry six digits
+#: (``EN-B000000``), so a five-digit bracket matches nothing. See
+#: ``modal_apps/dataprep/SKILL_SHARDSIZING.md``.
 DEFAULT_DATA_FILES = "Emilia/EN/*.tar"
 
 #: Slug for the on-disk artifact directory, as opposed to the hub dataset id.

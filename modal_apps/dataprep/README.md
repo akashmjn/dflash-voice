@@ -33,37 +33,40 @@ One app per dataset; both run the same pipeline with `--model chatterbox`.
 loader cuts each multi-turn row into one segment per turn.
 
 ```bash
-modal run modal_apps/dataprep/cbox-expresso30h-shards.py --rows 10   # test run
-modal run modal_apps/dataprep/cbox-expresso30h-shards.py --rows 0    # full dataset
-modal run modal_apps/dataprep/cbox-expresso30h-shards.py --no-sync
+modal run modal_apps/dataprep/cbox-expresso-shards.py --rows 10   # test run
+modal run modal_apps/dataprep/cbox-expresso-shards.py --rows 0    # full dataset
+modal run modal_apps/dataprep/cbox-expresso-shards.py --no-sync
 ```
 
-**Emilia (~10h)** — sized by tar glob rather than `--rows`: one EN tar is ~1.7h
-across ~37 speakers, so six tars is ~10h with enough speakers for a meaningful
-val split. `amphion/Emilia-Dataset` is gated, so the `hf-modal-0814` secret's
-token needs access to it.
+**Emilia (1 tar, ~68h)** — the glob picks language and subset; `--rows` picks
+the size. One YODAS EN tar is ~68h across ~25k utterances, so the default run is
+~85min of GPU and ~110 GiB of shards. `amphion/Emilia-Dataset` is gated, so the
+`hf-modal-0814` secret's token needs access to it.
 
 ```bash
-modal run modal_apps/dataprep/cbox-emilia10h-shards.py --rows 10     # smoke test
-modal run modal_apps/dataprep/cbox-emilia10h-shards.py               # the full ~10h
-modal run modal_apps/dataprep/cbox-emilia10h-shards.py --data-files 'Emilia/EN/EN-B0000[0-5]*.tar'
+modal run modal_apps/dataprep/cbox-emilia-shards.py --rows 10     # smoke test
+modal run modal_apps/dataprep/cbox-emilia-shards.py --rows 3800   # ~10h
+modal run modal_apps/dataprep/cbox-emilia-shards.py               # the full tar
 ```
 
-Tar names carry six digits (`EN-B000000`), so the last-digit bracket above is
-6 tars and `EN-B0000[0-5]*.tar` is 60 (~100h).
+**Size the run before launching it** — see [SKILL_SHARDSIZING.md](SKILL_SHARDSIZING.md).
+It verifies a tar pattern against the hub (a five-digit bracket silently matches
+nothing) and measures hours/speakers, so `--rows` is a number rather than a guess.
 
 Environment comes from this repo's `pyproject.toml` via the `dataprep-chatterbox` extra.  
 `dataprep/` is mounted rather than baked in — editing it re-runs without an image rebuild, while  
 changing `pyproject.toml` triggers one.
 
 Notes:
-- Scalability: Writes to local container ephemeral storage, and syncs after completion. Careful with >100h data.
-  With `--include-logits` the shards are ~16x larger — the 30h Expresso run produced ~50GB, so budget
-  roughly 1.7GB per hour of audio and check it against the container's disk before scaling up.
+- **Ephemeral disk.** Shards are written to container storage and synced only after `prepare`
+  finishes, so peak disk is the whole set. With `--include-logits` that is ~1.62 GiB per hour of
+  audio (measured: the 30h Expresso run produced ~49 GiB), against Modal's **512 GiB default** — so
+  one 68h tar uses ~21%, and ~300h is where it starts to bind. Overrunning it rejects writes as an
+  `OSError` mid-run. See [SKILL_SHARDSIZING.md](SKILL_SHARDSIZING.md) step 3 before scaling past that.
 - **An empty** `val/` **split.** `assign_split` hashes the speaker's source recording, so a smoke run
   over few speakers can put all of them on one side. The Emilia app warns when `val` comes out empty;
-  at ~222 speakers (6 tars) it does not, landing near 0.96 against a 0.95 target — speaker-level
-  hashing trades an exact ratio for no voice leaking into val.
+  at ~150 speakers / 92 sources (a ~10h YODAS slice) it does not, landing near 0.957 against a 0.95
+  target — speaker-level hashing trades an exact ratio for no voice leaking into val.
 - **Rows in** `failures.jsonl`**.** `prepare` skips bad utterances rather than aborting. A systematic
   decode bug shows up as *every* utterance failing, not a handful, so a small nonzero count is healthy.
 - **Shard sets cannot be appended to.** Resume is keyed on the string `seq_id`; a rerun needs a new
@@ -73,7 +76,7 @@ Notes:
 ### Throughput
 
 Benchmark for single-process, single-GPU run on Expresso dataset (30h), from
-`cbox-expresso30h-shards.py`. Measured before the Segment refactor; the Emilia
+`cbox-expresso-shards.py`. Measured before the Segment refactor; the Emilia
 run has no numbers yet.
 
 ```yaml

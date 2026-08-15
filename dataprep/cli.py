@@ -156,8 +156,8 @@ def prepare_command(
     dataset: str = typer.Option("emilia", help=DATASET_HELP),
     data_files: Optional[str] = typer.Option(
         None,
-        help="emilia only: tar path glob selecting language and size "
-        "(default: all EN; one tar is ~1.7h)",
+        help="emilia only: tar path glob selecting language and subset "
+        "(default: all EN). Size the run with --rows, not this",
     ),
     split_ratio: float = typer.Option(0.95, help="fraction of speakers routed to train"),
     samples_per_shard: int = typer.Option(250, help="sequences per tar shard"),

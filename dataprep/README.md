@@ -23,14 +23,15 @@ python -m dataprep.cli prepare --model chatterbox  # whole dataset, straight to 
 
 
 ```bash
-# Emilia (default): --data-files picks the language and the size of the run
-python -m dataprep.cli prepare --model chatterbox --data-files 'Emilia/EN/EN-B0000[0-5]*.tar'
+# Emilia (default): --data-files picks the language/subset, --rows the size
+python -m dataprep.cli prepare --model chatterbox --data-files 'Emilia-YODAS/EN/EN-B000000.tar' --rows 3800
 python -m dataprep.cli prepare --model chatterbox --dataset expresso --rows 60
 python -m dataprep.cli inspect --model chatterbox --rows 3 --stage tokenize
 ```
 
-`amphion/Emilia-Dataset` is gated: `HF_TOKEN` must be set. One EN tar is ~1.7h of audio across ~37
-speakers, so ~60 tars is roughly 100h.
+`amphion/Emilia-Dataset` is gated: `HF_TOKEN` must be set. A glob is not a size control — one EN tar
+already holds ~68h across ~25k utterances, so size a run with `--rows`. See
+[modal_apps/dataprep/SKILL_SHARDSIZING.md](../modal_apps/dataprep/SKILL_SHARDSIZING.md) for measuring a pattern first.
 
 Shards land in `data/sharded_wds/SLUG/`, named per run (`--slug`, default `DATASET-rowsN`) since a
 shard set is defined by the run that produced it. Overwriting one needs `--force`. Failed utterances
