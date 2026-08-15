@@ -13,13 +13,16 @@ Pipeline: **dataprep** (tokenize + teacher-forced featurize) → **experiments**
 ```text
 dflash-voice/
 ├── dataprep/              tokenize + featurize pipeline
-│   ├── common.py            shared dataclasses (Segment, TokenizedSequence, FeaturizedSequence, ...)
+│   ├── types.py             shared dataclasses (Segment, TokenizedSequence, FeaturizedSequence, ...)
+│   ├── utils.py               array coercion, key/padding helpers, NLL scoring
+│   ├── common.py              re-export shim over types.py + utils.py
 │   ├── cli.py                CLI entrypoint (python -m dataprep.cli <prepare|inspect>)
 │   ├── pipeline.py            tokenize + featurize compute stages
 │   ├── shards.py              streams sequences into WebDataset shards
-│   ├── expresso.py            dataset loader (only one wired up)
-│   ├── miso.py                the maintained tokenize/featurize backend
-│   ├── mlx_backends/           DEPRECATED qwen3.py / fish.py (MLX-only, unverified)
+│   ├── datasources/           dataset loaders, each yielding a Segment stream
+│   │   ├── emilia.py            default; gated, needs HF_TOKEN
+│   │   └── expresso.py          cuts multi-turn rows into segments
+│   ├── miso.py / chatterbox.py  the tokenize/featurize backends
 │   └── tests/
 ├── mlx_decode/            ported MLX inference loops per model, for benchmarking
 │   ├── bench.py               benchmark CLI entrypoint
@@ -47,7 +50,7 @@ Populated by `dataprep.cli`: `inspect` writes the per-row raw/tokenized/featuriz
 data/
 ├── dataprep_logs/
 │   └── failures.jsonl              # per-row failures across prepare runs
-├── expresso/                       # DATASET, defaults to dataprep.expresso.DATASET_NAME
+├── expresso/                       # DATASET, defaults to dataprep.datasources.expresso.DATASET_NAME
 │   ├── raw/ROW/                    # model-independent source, e.g. raw/0/
 │   │   ├── audio.wav                 channel-first; transcript times in seconds
 │   │   ├── transcript_segments.json
@@ -73,10 +76,9 @@ data/
 
 ## Environments (mutually exclusive extras)
 
-`dataprep-miso` pins Transformers 4.49 (via MisoTTS); `dataprep-mlx`/`mlx_decode` pin Transformers 5.6 + huggingface-hub 1.5; `dataprep-chatterbox` pins Transformers 5.2 + torch 2.6 (via chatterbox-tts). Only install one extra per venv.
+`dataprep-miso` pins Transformers 4.49 (via MisoTTS); `mlx_decode` pins Transformers 5.6 + huggingface-hub 1.5; `dataprep-chatterbox` pins Transformers 5.2 + torch 2.6 (via chatterbox-tts). Only install one extra per venv.
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"        # deprecated Qwen3 / Fish dataprep + MLX inference
 uv pip install -e ".[dataprep-miso]"       # Miso dataprep (needs MisoTTS package)
 uv pip install -e ".[dataprep-chatterbox]" # Chatterbox AR + Flash dataprep
 uv pip install -e ".[mlx_decode]"          # MLX inference/benchmarking only
@@ -88,21 +90,22 @@ Requires Apple Silicon (MLX) for anything touching `mlx_decode` or the MLX datap
 ## Commands
 
 ```bash
-# dataprep: stream Expresso into WebDataset shards, from repo root
-# (--model qwen3|fish also parse but are deprecated; see dataprep/mlx_backends/README.md)
-python -m dataprep.cli prepare --model miso [--rows N] [--slug NAME]
-# per-row intermediates on disk instead, for inspection (a few rows only)
+# dataprep: stream a dataset into WebDataset shards, from repo root
+# --dataset picks the loader (emilia default, expresso); --data-files sizes an Emilia run
+python -m dataprep.cli prepare --model chatterbox [--data-files 'Emilia/EN/EN-B0000[0-5]*.tar']
+python -m dataprep.cli prepare --model miso --dataset expresso [--rows N] [--slug NAME]
+# per-utterance intermediates on disk instead, for inspection (a few only)
 python -m dataprep.cli inspect --model miso --rows 3 [--stage <tokenize|featurize>]
 
 # MLX inference benchmark
 python mlx_decode/bench.py --model <qwen3|fish|miso>
 
-# tests — `-m 'not expensive and not deprecated'` is the pytest default
-# (skips full-model-loading tests and the deprecated qwen3/fish backends)
+# tests — `-m 'not expensive'` is the pytest default (skips full-model-loading tests)
 pytest -v mlx_decode/tests/test_decode_parity.py
 pytest -v dataprep/tests/
 pytest -v -m expensive dataprep/tests/test_miso_entropy.py
-pytest -v -m deprecated dataprep/tests/       # qwen3/fish MLX backends
+# note: the expensive miso tests auto-skip on Apple silicon (MPS conv1d output
+# cap on Mimi's 30s encode chunk); they need a CUDA/CPU box to actually run
 
 # demo: two-speaker podcast render
 python demo/demo_tts_podcast.py render --model miso --max-segments 6
@@ -115,14 +118,14 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 
 ## Architecture
 
-**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `raw (audio + transcript) --tokenize--> tokenized --featurize--> featurized --shard--> wds shards`. `cli.py` is the entrypoint, `pipeline.py` the compute stages, `shards.py` the WebDataset writers — `prepare` streams rows straight into shards (deterministic sample order, flat memory), `inspect` writes per-row intermediates for a handful of rows. `miso` is the only maintained backend; `qwen3`/`fish` are deprecated under `dataprep/mlx_backends/`
-(MLX-only, unverified, warn on use, skipped by default in tests) and should not constrain pipeline
-changes. `prepare` is one pull-driven chain, `HF dataset -> DecodedExample stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for rows actually written and `skip_rows` can drop a row cheaply. Train/val is assigned by hashing the row id so a row's sequences never straddle the split. `common.py` holds the shared dataclasses passed between stages instead of raw tensors:
-- `Segment` — one speaker turn, metadata only.
+**dataprep/** — turns speech datasets into per-model token sequences and teacher-forced features: `utterance (audio + transcript) --tokenize--> tokenized --featurize--> featurized --shard--> wds shards`. `cli.py` is the entrypoint, `pipeline.py` the compute stages, `shards.py` the WebDataset writers — `prepare` streams utterances straight into shards (deterministic sample order, flat memory), `inspect` writes per-utterance intermediates for a handful. Backends are `miso` and `chatterbox`; the deprecated MLX `qwen3`/`fish` backends were deleted and live on branch `akash/dataprep-backup-mlx-0814`.
+
+**One utterance is one `Segment`, one `TokenizedSequence`, one `ShardSample`**, keyed by the loader-supplied `Segment.id` (native for Emilia, synthesized by the Expresso loader). Dataset shape is the loader's problem: `datasources/expresso.py` cuts multi-turn rows into per-turn segments; everything downstream is dataset-agnostic. `prepare` is one pull-driven chain, `HF dataset -> Segment stream -> shard_prepare -> sample stream`: `shards.shard_prepare` drives `pipeline.stream_prepared_samples` from inside its write loop, so the forward pass runs only for segments actually written and `skip_ids` can drop one cheaply. Train/val is assigned by hashing the speaker (via `shards.split_key`, which strips YODAS's `_SPEAKER_nn` suffix) so a source recording never straddles the split. `types.py` holds the shared dataclasses passed between stages instead of raw tensors (`common.py` re-exports them for older import sites):
+- `Segment` — one utterance: id, transcript, speaker, and its own waveform.
 - `TokenizedSequence` — model-ready `(L, C+1)` tokens + `TokenizedSequenceLayout` (per-model geometry) + spans (`SpanKind`: text/audio/special). Spans are the source of truth for which columns hold a real token — no mask is stored; backends needing one derive it (see `dataprep/miso.py::_channel_mask`).
 - `FeaturizedSequence` — teacher-forced `{logits, hiddens}`, length `L-1`; index `i` predicts `tokens[i+1]`. For audio span `[s, e)`, predictions live at `[s-1, e-1)` — use `feature_slice_for_targets` rather than reimplementing the offset.
 - `ShardSample` — one sequence serialized to `.npy` bytes for a WebDataset shard.
-- `audio_frame_metrics`/`nll_summary` score a featurized sequence into `semantic`/`audio`/`total` NLL (nats/frame, kbit/s).
+- `utils.py`'s `audio_frame_metrics`/`nll_summary` score a featurized sequence into `semantic`/`audio`/`total` NLL (nats/frame, kbit/s).
 
 **mlx_decode/** — vendored/ported MLX TTS inference loop (from `mlx-audio` 0.4.4) as single-file modules per model, reusing its weights/`nn.Module`s but reimplementing prompt construction, autoregression, and codec decode so timing breaks down per step.
 

@@ -7,14 +7,14 @@ Each shard holds ~``samples_per_shard`` sequences. Per sample:
   {key}.logits.npy   — float16 (F, num_codebooks, vocab)  optional
   {key}.kv.npy       — float16 (F, layers, 2, heads, kv_dim)  optional
 
-``shard_prepare`` takes a ``DecodedExample`` stream and drives tokenize/featurize
-itself, so the forward pass runs only for rows it writes. The dataset is never
-held in memory: the train/val split is a per-row hash and shards roll over as
-they fill.
+``shard_prepare`` takes a :class:`Segment` stream and drives tokenize/featurize
+itself, so the forward pass runs only for segments it writes. The dataset is
+never held in memory: the train/val split is a per-speaker hash and shards roll
+over as they fill.
 
 Samples are written in the order they arrive. That is what keeps a run
-resumable -- where a sample lands depends only on ``(row, seq_id)``, and
-buffered shuffle is left to the training dataloader.
+resumable -- where a sample lands depends only on ``seq_id``, and buffered
+shuffle is left to the training dataloader.
 
 Library module: the command line lives in ``dataprep.cli``.
 """
@@ -25,6 +25,7 @@ import hashlib
 import io
 import json
 import random
+import re
 from pathlib import Path
 from typing import Iterable, Iterator
 
@@ -33,12 +34,12 @@ import torch
 
 from dataprep.common import (
     FeaturizedSequence,
+    Segment,
     ShardSample,
     TokenSpanKind,
     TokenizedSequence,
     _as_numpy,
 )
-from dataprep.expresso import DATASET_NAME, DecodedExample
 
 
 DATA_ROOT = Path("data")
@@ -105,7 +106,7 @@ class ShardWriter:
 
 
 def shard_prepare(
-    raw_examples: Iterable[DecodedExample],
+    segments: Iterable[Segment],
     *,
     model: str,
     tokenizer,
@@ -117,21 +118,20 @@ def shard_prepare(
     shuffle_seed: int = 42,
     shuffle_buffer: int = 0,
     log_root: Path | None = None,
-    pack_segments: bool = False,
     progress: bool = True,
-    skip_rows: set[int] | None = None,
+    skip_ids: set[str] | None = None,
 ) -> dict:
-    """Tokenize, featurize and shard a stream of decoded rows.
+    """Tokenize, featurize and shard a stream of segments.
 
     Owns the compute rather than consuming ready-made samples, so tokenize and
-    featurize run per sample written and ``skip_rows`` can drop a row before it
-    costs a forward pass.
+    featurize run per sample written and ``skip_ids`` can drop a segment before
+    it costs a forward pass.
 
-    Nothing scales with dataset size: the train/val split is a per-row hash and
-    shards are written as samples arrive.
+    Nothing scales with dataset size: the train/val split is a per-speaker hash
+    and shards are written as samples arrive.
 
     Sample order is deterministic by default -- shard position is a function of
-    ``(row, seq_id)``. ``shuffle_buffer`` trades that for write-time mixing; see
+    ``seq_id``. ``shuffle_buffer`` trades that for write-time mixing; see
     :func:`shuffle_stream`.
 
     ``wds_root`` is the shard directory itself (see :func:`shard_root`).
@@ -141,14 +141,13 @@ def shard_prepare(
     from dataprep.pipeline import stream_prepared_samples
 
     samples = stream_prepared_samples(
-        raw_examples,
+        segments,
         model=model,
         tokenizer=tokenizer,
         log_root=log_root,
-        pack_segments=pack_segments,
         include_kv=include_kv,
         include_logits=include_logits,
-        skip_rows=skip_rows,
+        skip_ids=skip_ids,
     )
 
     writers = {
@@ -169,7 +168,7 @@ def shard_prepare(
             if first_meta is None:
                 first_meta = sample.meta()
             split = assign_split(
-                sample.row, split_ratio=split_ratio, seed=shuffle_seed
+                sample.speaker, split_ratio=split_ratio, seed=shuffle_seed
             )
             writers[split].write(sample)
             bar.update(1)
@@ -221,9 +220,9 @@ def shuffle_stream(
 ) -> Iterator[ShardSample]:
     """Reservoir-shuffle an iterator through a fixed-size buffer.
 
-    Off by default: sequences arrive grouped by row, so shuffling here spreads 
-    a row's turns across shards, making written order depend on buffer state, 
-    blocking ability to easily resume on cancel/failure.
+    Off by default: sequences arrive in dataset order, so shuffling here makes
+    written order depend on buffer state, blocking the ability to easily resume
+    on cancel/failure.
     """
     if buffer_size <= 1:
         yield from samples
@@ -247,8 +246,7 @@ def build_sample(
     seq,
     feat,
     *,
-    row: int,
-    seq_id: int,
+    segment: Segment,
     model: str,
     frame_rate: float,
     include_kv: bool = False,
@@ -269,9 +267,12 @@ def build_sample(
     audio_spans = seq.spans_of(TokenSpanKind.AUDIO)
     if not audio_spans:
         return None
-    # Miso: one audio span per sequence; multi-span packing not supported yet.
+    # One segment per sequence, so one audio span. A second span means a backend
+    # laid out something the shard format cannot address.
     if len(audio_spans) > 1:
-        raise ValueError(f"Row {row} seq {seq_id}: multi-span sequences not yet supported")
+        raise ValueError(
+            f"{segment.id}: expected one audio span, got {len(audio_spans)}"
+        )
 
     span = audio_spans[0]
     s, e = span.start, span.end
@@ -284,14 +285,12 @@ def build_sample(
     # tokens[s:e, 0:num_codebooks] — first num_codebooks columns are audio
     targets = seq.tokens[s:e, :num_codebooks].to(torch.int16).numpy()  # (F, K)
 
-    assert h_audio.shape == (F, hidden_dim), f"hiddens shape mismatch row {row} seq {seq_id}"
-    assert targets.shape == (F, num_codebooks), f"targets shape mismatch row {row} seq {seq_id}"
+    assert h_audio.shape == (F, hidden_dim), f"hiddens shape mismatch {segment.id}"
+    assert targets.shape == (F, num_codebooks), f"targets shape mismatch {segment.id}"
 
     sample = ShardSample(
-        row=row,
-        seq_id=seq_id,
-        source_dataset_id=span.source_dataset_id,
-        segment_id=span.segment_id,
+        seq_id=segment.id,
+        speaker=segment.speaker,
         audio_frames=F,
         frame_rate=frame_rate,
         model=model,
@@ -306,7 +305,7 @@ def build_sample(
             feat, s, e, num_codebooks=num_codebooks
         )
         assert logits.shape[:2] == (F, num_codebooks), (
-            f"logits shape mismatch row {row} seq {seq_id}: {logits.shape}"
+            f"logits shape mismatch {segment.id}: {logits.shape}"
         )
         sample.logits = _npy_bytes(logits)
         sample.vocab_size = int(logits.shape[-1])
@@ -377,19 +376,33 @@ def shard_root(slug: str, *, data_root: Path = DATA_ROOT) -> Path:
     return data_root / SHARD_DIRNAME / slug
 
 
-def assign_split(row: int, *, split_ratio: float, seed: int = 42) -> str:
-    """Deterministically route a whole row to 'train' or 'val'.
+#: Emilia-YODAS diarizes one source recording into ``..._SPEAKER_00``,
+#: ``_SPEAKER_01``, ... Those share a microphone, room and background, so they
+#: must not be split apart. Emilia proper carries no such suffix, where this is
+#: a no-op.
+_SPEAKER_SUFFIX = re.compile(r"_SPEAKER_\d+$")
 
-    Hashing the row id rather than slicing a shuffled list has two properties a
-    streaming exporter needs. Every sequence from a row lands on the same side,
-    so a speaker's other turns in the same recording cannot leak from train into
-    val and flatter the eval. And the answer depends only on the row id, so it
-    survives shuffling, restarts, and interrupted runs.
 
-    blake2b, not hash(): PYTHONHASHSEED randomizes str/int hashing per process,
+def split_key(speaker: str) -> str:
+    """Group a speaker label by its source recording."""
+    return _SPEAKER_SUFFIX.sub("", speaker)
+
+
+def assign_split(speaker: str, *, split_ratio: float, seed: int = 42) -> str:
+    """Deterministically route a whole source recording to 'train' or 'val'.
+
+    Hashing the speaker keeps every utterance from one recording on the same
+    side, so a voice cannot leak into val and flatter the eval, and the answer
+    survives shuffling and restarts. The cost is an approximate ratio: speaker
+    counts are skewed, so the realized train fraction wobbles a few points off
+    ``split_ratio``.
+
+    blake2b, not hash(): PYTHONHASHSEED randomizes str hashing per process,
     which would reshuffle the split between runs.
     """
-    digest = hashlib.blake2b(f"{seed}:{row}".encode(), digest_size=8).digest()
+    digest = hashlib.blake2b(
+        f"{seed}:{split_key(speaker)}".encode(), digest_size=8
+    ).digest()
     # Map the digest onto [0, 1) and compare against the train fraction.
     fraction = int.from_bytes(digest, "big") / float(1 << 64)
     return "train" if fraction < split_ratio else "val"

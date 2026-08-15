@@ -24,7 +24,9 @@ Models are validated on ground truth tokenized (text, audio) sequences to comput
 > The `fish` and `qwen3` rows come from dataprep backends that are now **deprecated and
 > unverified** — qwen3's semantic NLL in particular is suspect (codebook 0 scores well above its
 > predictive entropy, which usually means misaligned targets). Treat both rows as indicative and
-> the `miso` row as the verified one. See [dataprep/mlx_backends](../../dataprep/mlx_backends/README.md).
+> the `miso` row as the verified one. Those backends have since been deleted from `dataprep/`; they
+> are preserved on branch `akash/dataprep-backup-mlx-0814`. The metrics below still reproduce from
+> the saved artifacts under `data/expresso/metrics/`, which `model_metrics.py` reads directly.
 
 - NLL is normalized to `kbits/s` computed as  `kbits/s = avg NLL per codebook × num_codebooks x log2(e) × frame_rate / 1000`
 - Computed over a subset of first 10 dataset rows (`--rows 10`) ~4300 seconds by tokenizing, running a forward pass + dumping logits
@@ -50,10 +52,9 @@ Run from the repo root:
 **1. Dataprep** — tokenize dataset rows + featurize into (hiddens, logits) with model forward pass, writes to `data/DATASET/featurized/MODEL/ROW/`:
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"
-python -m dataprep.cli inspect --model <miso|qwen3|fish> --rows 10
-# note: the qwen3/fish dataprep backends are now deprecated and unverified —
-# see dataprep/mlx_backends/README.md before rerunning or citing their numbers
+uv pip install -e ".[dataprep-miso]"
+python -m dataprep.cli inspect --model miso --dataset expresso --rows 10
+# note: qwen3/fish were deleted; check out akash/dataprep-backup-mlx-0814 to rerun their numbers
 ```
 
 **2. Compute metrics** - converts logits into (NLL, entropy) per frame and codebook, writes to `data/DATASET/metrics/MODEL/ROW/MODEL_metrics.{npz,json}`:

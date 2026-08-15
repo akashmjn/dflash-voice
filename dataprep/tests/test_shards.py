@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 import torch
 
-from dataprep.expresso import DATASET_NAME
+from dataprep.datasources.expresso import DATASET_NAME
 
 BARE_DATA_ROOT = Path(__file__).resolve().parents[2] / "data"
 DATA_ROOT = BARE_DATA_ROOT / DATASET_NAME
@@ -42,23 +42,35 @@ def _load_npy(data: bytes) -> np.ndarray:
 # Fixture: export 3 rows to a temporary WDS directory once per test session.
 # ---------------------------------------------------------------------------
 
-def _replay_rows(rows):
-    """Stand-in for the hub loader, replaying rows already on disk.
+def replay_seq_id(row: int, index: int) -> str:
+    """Id for a replayed sequence.
 
-    The audio is a placeholder -- the patched tokenize never reads it.
+    The on-disk ``metadata.json`` predates string ids, so the fixture
+    synthesizes them positionally -- the same scheme the Expresso loader uses,
+    which keeps ids sorting in stream order.
     """
-    from dataprep.expresso import DecodedExample
+    return f"expresso_r{row:06d}_s{index:03d}"
+
+
+def _replay_segments(rows):
+    """Stand-in for the hub loader, replaying sequences already on disk.
+
+    The audio is a placeholder -- the patched prepare_segment never reads it.
+    Speakers are row-scoped, as the Expresso loader emits them, so the split
+    test has something real to group on.
+    """
+    from dataprep.common import Segment
 
     for row in rows:
-        yield DecodedExample(
-            row=row,
-            audio_path=Path(),
-            transcript_path=Path(),
-            sample_rate=24000,
-            num_channels=1,
-            segments=[],
-            audio=np.zeros((1, 1), dtype=np.float32),
-        )
+        count = len(_ReplayTokenizer.sequence_count(BARE_DATA_ROOT, "miso", row))
+        for index in range(count):
+            yield Segment(
+                id=replay_seq_id(row, index),
+                text="",
+                speaker=f"r{row:06d}_ex01",
+                audio=np.zeros(1, dtype=np.float32),
+                sample_rate=24000,
+            )
 
 
 class _ReplayTokenizer:
@@ -74,18 +86,22 @@ class _ReplayTokenizer:
             "codec", (), {"frame_rate": float(feat_meta["frame_rate"])}
         )()
         self.featurizer = self
-        # Paired by identity, not seq_id -- that is a segment id, not an index.
-        self._pairs: dict[int, object] = {}
+        # Keyed by seq_id, which is now a stable string rather than an index.
+        self._pairs: dict[str, object] = {}
 
     def featurize(self, sequence, include_kv=False):
-        return self._pairs[id(sequence)]
+        return self._pairs[sequence.seq_id]
 
-    def sequences_for(self, row: int):
+    @staticmethod
+    def sequence_count(data_root: Path, model: str, row: int):
         from dataprep.common import TokenizedSequence
 
-        tok_dir = self.data_root / DATASET_NAME / "tokenized" / self.model / str(row)
+        tok_dir = data_root / DATASET_NAME / "tokenized" / model / str(row)
         sequences, _ = TokenizedSequence.load_all(tok_dir)
         return sequences
+
+    def sequences_for(self, row: int):
+        return self.sequence_count(self.data_root, self.model, row)
 
     def features_for(self, row: int):
         from dataprep.common import FeaturizedSequence
@@ -108,27 +124,35 @@ def wds_root(tmp_path_factory, monkeypatch_session):
 
     tokenizer = _ReplayTokenizer(BARE_DATA_ROOT, "miso")
 
-    def fake_tokenize(example, audio, *, tokenizer, log_root, pack_segments=False):
-        sequences = tokenizer.sequences_for(example.row)
-        features = tokenizer.features_for(example.row)
+    # Look the saved pair back up by the id the segment was synthesized with,
+    # so one replayed segment maps to exactly one on-disk sequence.
+    index_by_id = {}
+    for row in rows:
+        sequences = tokenizer.sequences_for(row)
+        features = tokenizer.features_for(row)
         assert len(sequences) == len(features)
-        for seq, feat in zip(sequences, features):
-            tokenizer._pairs[id(seq)] = feat
-        return sequences, None, [None] * len(sequences)
+        for index, (seq, feat) in enumerate(zip(sequences, features)):
+            seq_id = replay_seq_id(row, index)
+            seq.seq_id = seq_id
+            index_by_id[seq_id] = seq
+            tokenizer._pairs[seq_id] = feat
 
-    monkeypatch_session.setattr(pipeline, "tokenize_example", fake_tokenize)
+    def fake_prepare(segment, tokenizer):
+        return index_by_id[segment.id], None
+
+    monkeypatch_session.setattr(pipeline, "prepare_segment", fake_prepare)
 
     wds_root = shard_root(f"{DATASET_NAME}-test", data_root=out)
     shard_prepare(
-        _replay_rows(rows),
+        _replay_segments(rows),
         model="miso",
         tokenizer=tokenizer,
         wds_root=wds_root,
-        # The split is a per-row hash, so with only 3 rows most ratio/seed pairs
-        # strand one side entirely. This pair puts rows 0,1 in train and 2 in val.
+        # Per-speaker hash: with only 3 rows most ratio/seed pairs strand one
+        # side. This pair puts rows 0,2 in train and row 1 in val.
         split_ratio=0.7,
         samples_per_shard=50,  # small shards for speed in tests
-        shuffle_seed=1,
+        shuffle_seed=3,
         progress=False,
     )
     return wds_root
@@ -180,41 +204,63 @@ def test_shards_index_written(wds_root):
     assert len(idx["train"]) >= 1
 
 
-def test_no_row_straddles_the_split(wds_root):
-    """A row's sequences must land wholly in train or wholly in val.
+def test_no_speaker_straddles_the_split(wds_root):
+    """A speaker's sequences must land wholly in train or wholly in val.
 
-    Sequences from one row share speakers and a recording session; splitting
-    them across train/val would leak that identity into the eval.
+    Utterances from one source recording share a voice, a microphone and a
+    room; splitting them across train/val would leak that identity into eval.
     """
     import tarfile
 
-    sides: dict[int, set[str]] = {}
+    from dataprep.shards import split_key
+
+    sides: dict[str, set[str]] = {}
     for split in ("train", "val"):
         for tar_path in sorted((wds_root / split).glob("*.tar")):
             with tarfile.open(tar_path) as tf:
                 for member in tf.getmembers():
                     if not member.name.endswith("meta.json"):
                         continue
-                    row = json.loads(tf.extractfile(member).read())["row"]
-                    sides.setdefault(row, set()).add(split)
+                    speaker = json.loads(tf.extractfile(member).read())["speaker"]
+                    sides.setdefault(split_key(speaker), set()).add(split)
 
-    straddling = {row: s for row, s in sides.items() if len(s) > 1}
-    assert not straddling, f"rows present in both splits: {straddling}"
+    straddling = {key: s for key, s in sides.items() if len(s) > 1}
+    assert not straddling, f"speakers present in both splits: {straddling}"
 
 
 def test_split_assignment_is_deterministic():
     """The split must not move between processes or runs."""
     from dataprep.shards import assign_split
 
-    first = [assign_split(r, split_ratio=0.9, seed=7) for r in range(200)]
-    second = [assign_split(r, split_ratio=0.9, seed=7) for r in range(200)]
+    speakers = [f"EN_B{i:05d}_S00000" for i in range(200)]
+    first = [assign_split(s, split_ratio=0.9, seed=7) for s in speakers]
+    second = [assign_split(s, split_ratio=0.9, seed=7) for s in speakers]
     assert first == second
     # A different seed must actually reshuffle the assignment.
-    other = [assign_split(r, split_ratio=0.9, seed=8) for r in range(200)]
+    other = [assign_split(s, split_ratio=0.9, seed=8) for s in speakers]
     assert other != first
-    # And the ratio should be roughly honoured over enough rows.
+    # And the ratio should be roughly honoured over enough speakers.
     train = sum(s == "train" for s in first)
     assert 0.8 < train / len(first) < 1.0
+
+
+def test_diarized_speakers_share_a_split():
+    """Emilia-YODAS splits one recording into ``..._SPEAKER_nn``.
+
+    Those share a microphone and room, so they must be grouped -- otherwise the
+    val set hears a voice it was trained on.
+    """
+    from dataprep.shards import assign_split, split_key
+
+    assert split_key("DE_wSq11gYbUgU_SPEAKER_04") == "DE_wSq11gYbUgU"
+    # Emilia proper carries no suffix, where grouping is a no-op.
+    assert split_key("EN_B00000_S00000") == "EN_B00000_S00000"
+
+    sides = {
+        assign_split(f"DE_wSq11gYbUgU_SPEAKER_{n:02d}", split_ratio=0.9)
+        for n in range(8)
+    }
+    assert len(sides) == 1, f"one recording landed on both sides: {sides}"
 
 
 def test_shuffle_stream_conserves_samples():
@@ -248,11 +294,19 @@ def logits_sample():
     feats, meta = FeaturizedSequence.load_all(MISO_FEAT / "0")
     # .to_wds(): the other tests read samples back out of tars, so comparing
     # against the same wire dict keeps every assertion in one shape.
+    from dataprep.common import Segment
+
+    segment = Segment(
+        id=replay_seq_id(0, 0),
+        text="",
+        speaker="r000000_ex01",
+        audio=np.zeros(1, dtype=np.float32),
+        sample_rate=24000,
+    )
     return build_sample(
         seqs[0],
         feats[0],
-        row=0,
-        seq_id=0,
+        segment=segment,
         model="miso",
         frame_rate=float(meta["frame_rate"]),
         include_logits=True,
@@ -326,11 +380,21 @@ def test_sample_shapes_and_dtypes(shard_samples):
 
 def _load_row_orig(row: int):
     """Return (sequences, features) from the original PT artifacts."""
-    from dataprep.common import FeaturizedSequence, TokenSpanKind, TokenizedSequence
+    from dataprep.common import FeaturizedSequence, TokenizedSequence
 
     seqs, _ = TokenizedSequence.load_all(MISO_TOK / str(row))
     feats, _ = FeaturizedSequence.load_all(MISO_FEAT / str(row))
     return seqs, feats
+
+
+def _origin(seq_id: str) -> tuple[int, int]:
+    """Recover ``(row, index)`` from a replayed seq_id.
+
+    ``seq_id`` is the shard's identity now, but the artifacts it was replayed
+    from are still stored per row, so the parity tests parse it back.
+    """
+    row, index = seq_id.removeprefix("expresso_r").split("_s")
+    return int(row), int(index)
 
 
 def test_targets_match_original_tokens(shard_samples):
@@ -342,14 +406,13 @@ def test_targets_match_original_tokens(shard_samples):
 
     for s in shard_samples:
         meta = json.loads(s["meta.json"])
-        row = meta["row"]
-        seq_id = meta["seq_id"]
+        row, index = _origin(meta["seq_id"])
 
         if row not in rows_loaded:
             rows_loaded[row] = _load_row_orig(row)
         seqs, _ = rows_loaded[row]
 
-        seq = seqs[seq_id]
+        seq = seqs[index]
         audio_spans = seq.spans_of(TokenSpanKind.AUDIO)
         assert len(audio_spans) == 1, f"Expected 1 audio span, got {len(audio_spans)}"
         span = audio_spans[0]
@@ -361,7 +424,7 @@ def test_targets_match_original_tokens(shard_samples):
         np.testing.assert_array_equal(
             actual_targets,
             expected_targets,
-            err_msg=f"Targets mismatch for row={row} seq={seq_id}",
+            err_msg=f"Targets mismatch for {meta['seq_id']}",
         )
 
 
@@ -373,15 +436,14 @@ def test_hiddens_close_to_original(shard_samples):
 
     for s in shard_samples:
         meta = json.loads(s["meta.json"])
-        row = meta["row"]
-        seq_id = meta["seq_id"]
+        row, index = _origin(meta["seq_id"])
 
         if row not in rows_loaded:
             rows_loaded[row] = _load_row_orig(row)
         seqs, feats = rows_loaded[row]
 
-        seq = seqs[seq_id]
-        feat = feats[seq_id]
+        seq = seqs[index]
+        feat = feats[index]
         span = seq.spans_of(TokenSpanKind.AUDIO)[0]
         s_idx, e_idx = span.start, span.end
 
@@ -395,7 +457,7 @@ def test_hiddens_close_to_original(shard_samples):
             expected_h,
             atol=1e-2,
             rtol=0,
-            err_msg=f"Hiddens mismatch for row={row} seq={seq_id}",
+            err_msg=f"Hiddens mismatch for {meta['seq_id']}",
         )
 
 
@@ -452,7 +514,7 @@ def test_nll_parity_with_saved_metrics(row):
 
 
 def test_sample_order_is_deterministic(wds_root):
-    """Samples land in arrival order, sorted by (row, seq_id) within a split.
+    """Samples land in arrival order, sorted by seq_id within a split.
 
     This is the property a resumed run relies on: where a sample lands depends
     only on its key, so replaying the stream and skipping what is already
@@ -466,10 +528,11 @@ def test_sample_order_is_deterministic(wds_root):
             for member in tar:
                 if member.name.endswith(".meta.json"):
                     entry = json.load(tar.extractfile(member))
-                    keys.append((entry["row"], entry["seq_id"]))
+                    keys.append(entry["seq_id"])
 
+    # Zero-padded ids sort in stream order, so arrival order is sorted order.
     assert keys == sorted(keys), "shard order is not deterministic"
-    assert len(keys) == len(set(keys)), "duplicate (row, seq_id) in shards"
+    assert len(keys) == len(set(keys)), "duplicate seq_id in shards"
 
 
 def test_next_shard_num_continues_past_existing(wds_root):

@@ -73,7 +73,7 @@ def sequence():
     def add(start, end, kind):
         spans.append(
             TokenSequenceSpan(
-                source_dataset_id=0, segment_id=0, start=start, end=end, kind=kind
+                start=start, end=end, kind=kind
             )
         )
 
@@ -128,8 +128,6 @@ def test_short_utterance_prompt_stops_at_the_audio_span(sequence):
         spans=[
             *sequence.spans,
             TokenSequenceSpan(
-                source_dataset_id=0,
-                segment_id=0,
                 start=sequence.length,
                 end=sequence.length + 9,
                 kind=TokenSpanKind.PADDING,

@@ -7,17 +7,12 @@ from dataprep.common import TokenSpanKind, audio_frame_metrics, nll_summary
 from dataprep.pipeline import load_tokenizer
 from dataprep.tests.conftest import featurize_segment, tokenize_segment
 
-DEPRECATED_MODELS = ("qwen3", "fish")
-
 
 @pytest.mark.parametrize(
     "model",
     [
         pytest.param("miso", marks=pytest.mark.expensive),
         pytest.param("chatterbox", marks=pytest.mark.expensive),
-        # Deprecated MLX backends: skipped by default, run with -m deprecated.
-        pytest.param("qwen3", marks=pytest.mark.deprecated),
-        pytest.param("fish", marks=pytest.mark.deprecated),
     ],
 )
 def test_featurize_segment0(segment0, model, expected_featurized):
@@ -61,17 +56,14 @@ def test_featurize_segment0(segment0, model, expected_featurized):
         )
     # Sanity check: NLL must stay near predictive entropy. Above it means the
     # logits are scored against the wrong targets; below it means future context
-    # leaks in. Exempt for the deprecated backends -- qwen3 cb0 trips it (NLL
-    # 4.01 vs entropy 0.97) and fish was never audited for the same class of bug.
-    # See dataprep/mlx_backends/README.md.
+    # leaks in.
     excess = codebook_nll - codebook_entropy
-    if model not in DEPRECATED_MODELS:
-        worst = int(abs(excess).argmax())
-        assert abs(excess[worst]) < 1.0, (
-            f"codebook {worst} is confidently wrong: NLL {codebook_nll[worst]:.3f} "
-            f"differs from entropy {codebook_entropy[worst]:.3f} by "
-            f"{excess[worst]:+.3f} nats"
-        )
+    worst = int(abs(excess).argmax())
+    assert abs(excess[worst]) < 1.0, (
+        f"codebook {worst} is confidently wrong: NLL {codebook_nll[worst]:.3f} "
+        f"differs from entropy {codebook_entropy[worst]:.3f} by "
+        f"{excess[worst]:+.3f} nats"
+    )
 
     torch.testing.assert_close(
         torch.tensor(nll.mean(axis=0), dtype=torch.float32),

@@ -51,19 +51,6 @@ dataprep-miso = [
     "soundfile",
     "pytest",
 ]
-dataprep-mlx = [
-    "mlx>=0.31.1",
-    "mlx-lm==0.31.1",
-    "mlx-audio==0.4.4",
-    "transformers==5.6.0",
-    "huggingface-hub==1.5.0",
-    "scipy",
-    "soundfile",
-    "torch",
-    "pytest",
-    "marimo",
-    "altair",
-]
 
 train = [
     "transformers==5.6.0",
@@ -75,9 +62,8 @@ train = [
 ]
 
 [tool.pytest.ini_options]
-addopts = "-m 'not expensive and not deprecated'"
+addopts = "-m 'not expensive'"
 markers = [
     "expensive: loads full models for dataprep featurization or entropy checks",
-    "deprecated: covers the unmaintained MLX dataprep backends (qwen3 / fish); see dataprep/mlx_backends/README.md",
     "backend(name): needs a dataprep backend's extra installed; skipped when absent (see dataprep/tests/conftest.py)",
 ]

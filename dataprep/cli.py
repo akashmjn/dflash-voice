@@ -1,169 +1,142 @@
-"""Turn dataset rows into training-ready WebDataset shards.
+"""Turn dataset utterances into training-ready WebDataset shards.
 
 Two verbs, in the order you reach for them::
 
-    python -m dataprep.cli inspect --model miso --rows 3
-    python -m dataprep.cli prepare --model miso
+    python -m dataprep.cli inspect --model chatterbox --rows 3
+    python -m dataprep.cli prepare --model chatterbox
 
-``inspect`` is the debugging path. It downloads a handful of rows to
-``data/DATASET/raw/`` and writes every intermediate to its own directory, so you
-can open a row's ``sequences.pt`` and see what the tokenizer did. ``--stage``
-stops after tokenize or featurize. Only sane for a few rows -- the per-row PT
-files cost more disk than the shards they would become.
+Both consume a stream of :class:`~dataprep.common.Segment`, one per utterance,
+from a loader (``--dataset emilia`` or ``expresso``). The only dataset-aware
+code here is :func:`_load_segments`.
+
+``inspect`` is the debugging path: every intermediate lands under
+``--data-root``, so you can open a segment's ``sequences.pt`` and see what the
+tokenizer did. ``--stage`` stops after tokenize. Only sane for a few segments.
 
 ``prepare`` is the whole-dataset path::
 
-    HF dataset -> raw example stream -> shard_prepare -> sample stream -> tars
+    HF dataset -> Segment stream -> shard_prepare -> sample stream -> tars
 
-Rows stream from the hub and go straight to shard writers; no wav, no
-``sequences.pt``, nothing per-row on disk. ``shard_prepare`` drives tokenize and
-featurize from inside its write loop, so the forward pass runs only for rows that
-get written. Memory stays flat regardless of dataset size: rows stream one at a
-time and shards roll over as they fill. Samples are written in arrival order, so
-a sample's place in the set depends only on ``(row, seq_id)``; batches get mixed
-by the training dataloader instead.
-
-Train/val is decided by hashing each row id, so every sequence from a row lands
-on the same side and one speaker's turns cannot leak across the split.
+Nothing per-segment touches disk, and memory stays flat regardless of dataset
+size. Samples are written in arrival order; batches get mixed by the training
+dataloader instead.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Iterator, Optional
 
 import typer
-from tqdm import tqdm
 
-from dataprep.expresso import (
-    DATASET_NAME,
-    DEFAULT_DATASET,
-    DEFAULT_SPLIT,
-    download_expresso,
-)
+from dataprep.common import Segment
 from dataprep.pipeline import (
     DEFAULT_DATA_ROOT,
     DEFAULT_LOG_ROOT,
-    featurize_row,
+    inspect_segments,
     load_tokenizer,
-    tokenize_row,
 )
 
-MODELS = ("miso", "chatterbox", "qwen3", "fish")
-# MLX-only, unmaintained, and not verified against the current pipeline. Accepted
-# so experiments/expresso_nll_entropy/ stays reproducible; warns on use.
-# See dataprep/mlx_backends/README.md.
-DEPRECATED_MODELS = ("qwen3", "fish")
+MODELS = ("miso", "chatterbox")
+DATASETS = ("emilia", "expresso")
 STAGES = ("tokenize", "featurize", "all")
 
-MODEL_HELP = (
-    "tokenizer backend: miso, chatterbox; qwen3 / fish (deprecated, MLX-only)"
-)
+MODEL_HELP = "tokenizer backend: miso, chatterbox"
+DATASET_HELP = f"source dataset loader: {' / '.join(DATASETS)}"
 
 app = typer.Typer(
     add_completion=False,
-    help="Prepare dataset rows into WebDataset shards for training.",
+    help="Prepare dataset utterances into WebDataset shards for training.",
 )
+
+
+def _load_segments(
+    dataset: str, *, limit: int | None, data_files: str | None
+) -> Iterator[Segment]:
+    """Open a loader's segment stream.
+
+    Imports stay inside the branches so an Expresso run never pulls in
+    Emilia's gated-auth path, and vice versa.
+    """
+    if dataset == "emilia":
+        from dataprep.datasources.emilia import DEFAULT_DATA_FILES, stream_emilia
+
+        return stream_emilia(
+            data_files=data_files or DEFAULT_DATA_FILES, limit=limit
+        )
+    if dataset == "expresso":
+        from dataprep.datasources.expresso import stream_expresso
+
+        if data_files:
+            raise typer.BadParameter("--data-files applies to --dataset emilia only")
+        return stream_expresso(limit=limit)
+    raise typer.BadParameter(f"dataset must be one of {' / '.join(DATASETS)}")
 
 
 def _tokenizer_device(tokenizer: Any) -> str:
     """Device the backend actually placed its models on.
 
     Read off the tokenizer rather than the ``--device`` option, which is
-    normally ``None`` and resolved per backend. The MLX ones report nothing.
+    normally ``None`` and resolved per backend.
     """
     for attr in ("featurizer", "audio_codec", "voice_encoder"):
         device = getattr(getattr(tokenizer, attr, None), "device", None)
         if device is not None:
             return str(device)
-    return "n/a (MLX)"
+    return "n/a"
 
 
 def _check_model(model: str) -> None:
     if model not in MODELS:
         raise typer.BadParameter(f"model must be one of {' / '.join(MODELS)}")
-    if model in DEPRECATED_MODELS:
-        typer.secho(
-            f"warning: --model {model} is deprecated and unmaintained (MLX-only, "
-            "not verified against the current pipeline). Output is indicative only. "
-            "See dataprep/mlx_backends/README.md.",
-            fg=typer.colors.YELLOW,
-            err=True,
-        )
 
 
 @app.command("inspect")
 def inspect_command(
     model: str = typer.Option(..., help=MODEL_HELP),
-    rows: int = typer.Option(3, help="number of rows to prepare, from row 0"),
+    rows: int = typer.Option(3, help="number of utterances to prepare"),
     stage: str = typer.Option("all", help=f"pipeline stage: {' / '.join(STAGES)}"),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
-    dataset: str = typer.Option(DATASET_NAME, help="on-disk dataset slug"),
+    dataset: str = typer.Option("emilia", help=DATASET_HELP),
+    data_files: Optional[str] = typer.Option(
+        None, help="emilia only: tar path glob, e.g. 'Emilia/EN/EN-B00000*.tar'"
+    ),
     log_root: Path = typer.Option(DEFAULT_LOG_ROOT, help="directory for failure logs"),
     model_id: Optional[str] = typer.Option(None, help="override the backend model id"),
     device: Optional[str] = typer.Option(None, help="cpu / mps / cuda (default: auto)"),
     dump_kv: bool = typer.Option(False, help="save the slow-AR layer KV cache"),
-    pack_segments: bool = typer.Option(
-        False, help="pack consecutive segments up to the model limit"
-    ),
 ) -> None:
-    """Prepare a few rows into per-row directories you can open and inspect.
+    """Prepare a few utterances into per-segment directories you can open.
 
-    Writes raw/, tokenized/, and featurized/ artifacts under --data-root. No
-    shards: 'prepare' is the path that writes those.
+    Writes tokenized/ and featurized/ artifacts under --data-root. No shards:
+    'prepare' is the path that writes those.
     """
     _check_model(model)
     if stage not in STAGES:
         raise typer.BadParameter(f"stage must be one of {' / '.join(STAGES)}")
     if rows < 1:
-        raise typer.BadParameter("--rows requires a positive row count")
+        raise typer.BadParameter("--rows requires a positive count")
 
-    row_ids = list(range(rows))
-    raw_root = data_root / dataset / "raw"
-
-    missing = [
-        row
-        for row in row_ids
-        if not (raw_root / str(row) / "transcript_segments.json").exists()
-    ]
-    if missing:
-        download_expresso(missing, root=raw_root)
-
+    segments = _load_segments(dataset, limit=rows, data_files=data_files)
     tokenizer = load_tokenizer(model, model_id=model_id, device=device)
 
     typer.echo(f"model      : {model}")
+    typer.echo(f"dataset    : {dataset}")
     typer.echo(f"stage      : {stage}")
-    typer.echo(f"rows       : {rows}")
+    typer.echo(f"utterances : {rows}")
     typer.echo(f"data root  : {data_root}")
     typer.echo(f"device     : {_tokenizer_device(tokenizer)}")
 
-    paths: list[Path] = []
-    if stage in ("tokenize", "all"):
-        for row in tqdm(row_ids, desc=f"Tokenizing {model}", unit="row"):
-            paths.append(
-                tokenize_row(
-                    raw_root / str(row),
-                    model=model,
-                    tokenizer=tokenizer,
-                    output_root=data_root,
-                    dataset=dataset,
-                    pack_segments=pack_segments,
-                    log_root=log_root,
-                )
-            )
-    if stage in ("featurize", "all"):
-        for row in tqdm(row_ids, desc=f"Featurizing {model}", unit="row"):
-            paths.append(
-                featurize_row(
-                    row,
-                    model=model,
-                    featurizer=tokenizer.featurizer,
-                    data_root=data_root,
-                    dataset=dataset,
-                    dump_kv=dump_kv,
-                    log_root=log_root,
-                )
-            )
+    paths = inspect_segments(
+        segments,
+        model=model,
+        tokenizer=tokenizer,
+        output_root=data_root,
+        dataset=dataset,
+        stage=stage,
+        dump_kv=dump_kv,
+        log_root=log_root,
+    )
     for path in paths:
         typer.echo(str(path))
 
@@ -172,7 +145,7 @@ def inspect_command(
 def prepare_command(
     model: str = typer.Option(..., help=MODEL_HELP),
     rows: Optional[int] = typer.Option(
-        None, help="cap at the first N streamed rows, for smoke tests"
+        None, help="cap at the first N streamed utterances, for smoke tests"
     ),
     slug: Optional[str] = typer.Option(
         None,
@@ -180,8 +153,13 @@ def prepare_command(
         "(default: DATASET-rowsN, or DATASET-full)",
     ),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
-    dataset: str = typer.Option(DATASET_NAME, help="source dataset slug"),
-    split_ratio: float = typer.Option(0.95, help="fraction of rows routed to train"),
+    dataset: str = typer.Option("emilia", help=DATASET_HELP),
+    data_files: Optional[str] = typer.Option(
+        None,
+        help="emilia only: tar path glob selecting language and size "
+        "(default: all EN; one tar is ~1.7h)",
+    ),
+    split_ratio: float = typer.Option(0.95, help="fraction of speakers routed to train"),
     samples_per_shard: int = typer.Option(250, help="sequences per tar shard"),
     shuffle_buffer: int = typer.Option(
         0,
@@ -206,14 +184,13 @@ def prepare_command(
 ) -> None:
     """Stream the whole dataset straight into WebDataset shards.
 
-    Nothing per-row touches disk. Failed rows are logged to failures.jsonl and
-    skipped rather than aborting the run.
+    Nothing per-utterance touches disk. Failed segments are logged to
+    failures.jsonl and skipped rather than aborting the run.
     """
     _check_model(model)
     if rows is not None and rows < 1:
-        raise typer.BadParameter("--rows requires a positive row count")
+        raise typer.BadParameter("--rows requires a positive count")
 
-    from dataprep.expresso import stream_expresso
     from dataprep.shards import shard_prepare, shard_root
 
     resolved_slug = slug or (f"{dataset}-rows{rows}" if rows else f"{dataset}-full")
@@ -225,11 +202,16 @@ def prepare_command(
             f"{wds_root} already exists; pass --force to overwrite or pick another --slug"
         )
 
+    segments = _load_segments(dataset, limit=rows, data_files=data_files)
     tokenizer = load_tokenizer(model, device=device, bucket_frames=bucket_frames)
 
     typer.echo(f"model      : {model}")
-    typer.echo(f"source     : {DEFAULT_DATASET} [{DEFAULT_SPLIT}]")
-    typer.echo(f"rows       : {rows if rows is not None else 'all (streaming)'}")
+    typer.echo(f"dataset    : {dataset}")
+    if dataset == "emilia":
+        from dataprep.datasources.emilia import DEFAULT_DATA_FILES
+
+        typer.echo(f"data files : {data_files or DEFAULT_DATA_FILES}")
+    typer.echo(f"utterances : {rows if rows is not None else 'all (streaming)'}")
     typer.echo(f"slug       : {resolved_slug}")
     typer.echo(f"output     : {wds_root}")
     typer.echo(f"device     : {_tokenizer_device(tokenizer)}")
@@ -240,7 +222,7 @@ def prepare_command(
     typer.echo(f"buckets    : {f'multiples of {bucket_frames}' if bucket_frames else 'off'}")
 
     shard_prepare(
-        stream_expresso(limit=rows),
+        segments,
         model=model,
         tokenizer=tokenizer,
         wds_root=wds_root,

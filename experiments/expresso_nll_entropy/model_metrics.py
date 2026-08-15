@@ -8,7 +8,7 @@ ground-truth NLL (the CE loss), then summarize NLL for the semantic / audio /
 total code groups in two units: the average NLL per codebook, and the bitrate
 that implies (`avg_nll × log2(e) × frame_rate × num_codebooks / 1000`), which is
 what makes models with different frame rates and codebook counts comparable.
-Scoring itself lives in `dataprep.common` (`audio_frame_metrics` and
+Scoring itself lives in `dataprep.utils` (`audio_frame_metrics` and
 `nll_summary`) so the dataprep tests can assert against it; this module is the
 batch driver plus the record shaping that `metrics_explore.py` charts.
 
@@ -39,7 +39,7 @@ from dataprep.common import (
     audio_frame_metrics,
     nll_summary,
 )
-from dataprep.expresso import DATASET_NAME
+from dataprep.datasources.expresso import DATASET_NAME
 
 # Anchor to the repo-root `data/` dir so the default holds no matter the cwd
 # (this file lives at <repo>/experiments/expresso_nll_entropy/model_metrics.py).
@@ -192,7 +192,6 @@ def compute_row_metrics(
                 "sequence_id": sequence_meta["sequence_id"],
                 "spans": [
                     {
-                        "segment_id": span.segment_id,
                         "start": span.start,
                         "end": span.end,
                     }

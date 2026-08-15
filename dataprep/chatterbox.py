@@ -23,7 +23,7 @@ export the empty text column.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 import torch
 
@@ -139,10 +139,6 @@ class ChatterboxAudioCodec:
     sample_rate = S3_SR  # 16_000
     frame_rate = float(S3_TOKEN_RATE)  # 25.0
     num_codebooks = 1
-
-    #: Encode per segment rather than slicing one whole-channel pass. S3's
-    #: encoder is bidirectional, so surrounding audio changes a segment's codes.
-    segmented_encode = True
 
     def __init__(
         self,
@@ -444,29 +440,19 @@ class ChatterboxTokenizer:
 
     def apply_chat_template(
         self,
-        segments: Sequence[Segment],
+        segment: Segment,
         *,
-        audio_codes: Mapping[int, Any] | None = None,
-        speaker_embeddings: Mapping[int, Any] | None = None,
+        audio_codes: Any | None = None,
     ) -> TokenizedSequence:
         """Lay one segment out as ``[cond | SOT text EOT | SOS y EOS]``.
 
-        One utterance per sequence: Chatterbox conditions on a single speaker
-        embedding and prompt, so packed turns would describe something the model
-        cannot consume, and ``TokenizedSequence.seq_id`` needs one segment id.
+        Chatterbox conditions on a single speaker embedding and prompt, so a
+        sequence is exactly one utterance.
         """
-        if len(segments) != 1:
-            raise ValueError(
-                "Chatterbox builds one sequence per segment; "
-                f"got {len(segments)} segments (packing is not supported)"
-            )
-        segment = segments[0]
-        audio_codes = audio_codes or {}
-        codes = audio_codes.get(segment.segment_id)
-        if codes is None:
+        if audio_codes is None:
             raise ValueError("Chatterbox supervised segments require audio_codes")
 
-        codes = torch.as_tensor(codes, dtype=torch.long)
+        codes = torch.as_tensor(audio_codes, dtype=torch.long)
         if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
             raise ValueError(
                 f"Expected (F, {self.audio_codec.num_codebooks}) Chatterbox codes, "
@@ -474,7 +460,7 @@ class ChatterboxTokenizer:
             )
         speech_ids = codes[:, 0]
         if speech_ids.numel() == 0:
-            raise ValueError(f"Segment {segment.segment_id} produced no speech tokens")
+            raise ValueError(f"Segment {segment.id} produced no speech tokens")
         if int(speech_ids.max()) >= self.hp.start_speech_token:
             raise ValueError(
                 f"Speech id {int(speech_ids.max())} is outside the S3 codec range "
@@ -483,21 +469,19 @@ class ChatterboxTokenizer:
 
         text_ids = self.encode_text(segment.text)
         if not text_ids:
-            raise ValueError(f"Segment {segment.segment_id} normalized to empty text")
+            raise ValueError(f"Segment {segment.id} normalized to empty text")
 
-        # Limits are per stream. The messages deliberately avoid the word
-        # "exceeds", which pipeline._pack_segments treats as a signal to split
-        # and retry -- never valid for this backend.
+        # Limits are per stream.
         n_text = len(text_ids) + 2  # + SOT/EOT
         n_speech = int(speech_ids.numel()) + 2  # + SOS/EOS
         if n_text > self.hp.max_text_tokens:
             raise ValueError(
-                f"Segment {segment.segment_id}: {n_text} text tokens is over the "
+                f"Segment {segment.id}: {n_text} text tokens is over the "
                 f"Chatterbox limit of {self.hp.max_text_tokens}"
             )
         if n_speech > self.hp.max_speech_tokens:
             raise ValueError(
-                f"Segment {segment.segment_id}: {n_speech} speech tokens is over the "
+                f"Segment {segment.id}: {n_speech} speech tokens is over the "
                 f"Chatterbox limit of {self.hp.max_speech_tokens}"
             )
 
@@ -508,7 +492,7 @@ class ChatterboxTokenizer:
             and ratio > self.max_frames_per_text_token
         ):
             raise ValueError(
-                f"Segment {segment.segment_id}: {frames} speech frames for "
+                f"Segment {segment.id}: {frames} speech frames for "
                 f"{len(text_ids)} text tokens (ratio {ratio:.0f}, limit "
                 f"{self.max_frames_per_text_token:.0f}) -- the transcript likely "
                 f"does not cover the audio: {segment.text[:60]!r}"
@@ -526,8 +510,6 @@ class ChatterboxTokenizer:
         def add_span(start: int, end: int, kind: TokenSpanKind) -> None:
             spans.append(
                 TokenSequenceSpan(
-                    source_dataset_id=segment.source_dataset_id,
-                    segment_id=segment.segment_id,
                     start=start,
                     end=end,
                     kind=kind,
@@ -574,14 +556,18 @@ class ChatterboxTokenizer:
         if padded_length > length:
             add_span(length, padded_length, TokenSpanKind.PADDING)
 
-        result = TokenizedSequence(tokens=tokens, spans=spans, layout=layout)
+        result = TokenizedSequence(
+            tokens=tokens, spans=spans, layout=layout, seq_id=segment.id
+        )
         result.validate(self.span_token_ranges)
         return result
 
-    def embedding_context(
-        self, segment: Segment, audio: Any, sample_rate: int
-    ) -> SequenceEmbeddingContext:
+    def embedding_context(self, segment: Segment) -> SequenceEmbeddingContext:
         """Precompute the speaker embedding for one segment's audio."""
         return SequenceEmbeddingContext(
-            values={"speaker_emb": self.voice_encoder.embed(audio, sample_rate)}
+            values={
+                "speaker_emb": self.voice_encoder.embed(
+                    segment.audio, segment.sample_rate
+                )
+            }
         )

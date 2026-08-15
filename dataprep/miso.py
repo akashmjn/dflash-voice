@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 # Moshi decode on Apple MPS needs this before Torch initializes MPS kernels, so
 # it must stay above the torch import below (directly, and via dataprep.common).
@@ -266,11 +266,10 @@ class MisoTokenizer:
 
     def apply_chat_template(
         self,
-        segments: Sequence[Segment],
+        segment: Segment,
         *,
-        audio_codes: Mapping[int, Any] | None = None,
+        audio_codes: Any | None = None,
     ) -> TokenizedSequence:
-        audio_codes = audio_codes or {}
         blocks = []
         spans: list[TokenSequenceSpan] = []
         position = 0
@@ -279,65 +278,53 @@ class MisoTokenizer:
             num_codebooks=self.audio_codec.num_codebooks, text_channel=-1
         )
 
-        for segment in segments:
-            text_ids = list(
-                self.text_tokenizer.encode(
-                    f"[{segment.speaker_id}] {segment.text.lstrip()}"
-                )
+        text_ids = list(
+            self.text_tokenizer.encode(f"[{segment.speaker_id}] {segment.text.lstrip()}")
+        )
+        text = torch.zeros(len(text_ids), channels, dtype=torch.long)
+        text[:, -1] = torch.tensor(text_ids, dtype=torch.long)
+        blocks.append(text)
+        spans.append(
+            TokenSequenceSpan(
+                start=position,
+                end=position + len(text_ids),
+                kind=TokenSpanKind.TEXT,
             )
-            text = torch.zeros(len(text_ids), channels, dtype=torch.long)
-            text[:, -1] = torch.tensor(text_ids, dtype=torch.long)
-            blocks.append(text)
+        )
+        position += len(text_ids)
+
+        if audio_codes is not None:
+            codes = torch.as_tensor(audio_codes, dtype=torch.long)
+            if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
+                raise ValueError(
+                    f"Expected (F, {self.audio_codec.num_codebooks}) Miso codes, "
+                    f"got {tuple(codes.shape)}"
+                )
+            audio = torch.zeros(codes.shape[0], channels, dtype=torch.long)
+            audio[:, :-1] = codes
+            blocks.append(audio)
             spans.append(
                 TokenSequenceSpan(
-                    source_dataset_id=segment.source_dataset_id,
-                    segment_id=segment.segment_id,
                     start=position,
-                    end=position + len(text_ids),
-                    kind=TokenSpanKind.TEXT,
+                    end=position + codes.shape[0],
+                    kind=TokenSpanKind.AUDIO,
                 )
             )
-            position += len(text_ids)
+            position += codes.shape[0]
 
-            codes = audio_codes.get(segment.segment_id)
-            if codes is not None:
-                codes = torch.as_tensor(codes, dtype=torch.long)
-                if codes.ndim != 2 or codes.shape[1] != self.audio_codec.num_codebooks:
-                    raise ValueError(
-                        f"Expected (F, {self.audio_codec.num_codebooks}) Miso codes, "
-                        f"got {tuple(codes.shape)}"
-                    )
-                audio = torch.zeros(codes.shape[0], channels, dtype=torch.long)
-                audio[:, :-1] = codes
-                blocks.append(audio)
-                spans.append(
-                    TokenSequenceSpan(
-                        source_dataset_id=segment.source_dataset_id,
-                        segment_id=segment.segment_id,
-                        start=position,
-                        end=position + codes.shape[0],
-                        kind=TokenSpanKind.AUDIO,
-                    )
+            # All-zero tokens, same as the grid's "no token here" fill --
+            # the EOS_AUDIO span is what marks this as a real stop frame.
+            eos = torch.zeros(1, channels, dtype=torch.long)
+            blocks.append(eos)
+            spans.append(
+                TokenSequenceSpan(
+                    start=position,
+                    end=position + 1,
+                    kind=TokenSpanKind.EOS_AUDIO,
                 )
-                position += codes.shape[0]
+            )
+            position += 1
 
-                # All-zero tokens, same as the grid's "no token here" fill --
-                # the EOS_AUDIO span is what marks this as a real stop frame.
-                eos = torch.zeros(1, channels, dtype=torch.long)
-                blocks.append(eos)
-                spans.append(
-                    TokenSequenceSpan(
-                        source_dataset_id=segment.source_dataset_id,
-                        segment_id=segment.segment_id,
-                        start=position,
-                        end=position + 1,
-                        kind=TokenSpanKind.EOS_AUDIO,
-                    )
-                )
-                position += 1
-
-        if not blocks:
-            raise ValueError("At least one segment is required")
         tokens = torch.cat(blocks, dim=0)
 
         unpadded_length = int(tokens.shape[0])
@@ -354,8 +341,6 @@ class MisoTokenizer:
             )
             spans.append(
                 TokenSequenceSpan(
-                    source_dataset_id=segments[-1].source_dataset_id,
-                    segment_id=segments[-1].segment_id,
                     start=unpadded_length,
                     end=padded_length,
                     kind=TokenSpanKind.PADDING,
@@ -366,6 +351,7 @@ class MisoTokenizer:
             tokens=tokens,
             spans=spans,
             layout=layout,
+            seq_id=segment.id,
         )
         result.validate()
         return result

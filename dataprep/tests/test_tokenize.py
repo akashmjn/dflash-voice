@@ -26,9 +26,7 @@ def test_miso_channel_mask_follows_spans():
     sequence = TokenizedSequence(
         tokens=torch.zeros(8, 3, dtype=torch.long),
         spans=[
-            TokenSequenceSpan(
-                source_dataset_id=0, segment_id=0, start=start, end=end, kind=kind
-            )
+            TokenSequenceSpan(start=start, end=end, kind=kind)
             for start, end, kind in spans
         ],
         layout=layout,
@@ -46,18 +44,9 @@ def test_miso_channel_mask_follows_spans():
 @pytest.mark.parametrize(
     "model",
     [
-        # xfail on Apple silicon: Mimi's 30 s encode chunk is past what MPS
-        # conv1d accepts. Not a tokenize bug, and it passes on CPU.
-        pytest.param(
-            "miso",
-            marks=[pytest.mark.expensive, pytest.mark.xfail(
-                raises=NotImplementedError, reason="MPS conv1d output cap"
-            )],
-        ),
+        # On Apple silicon this is skipped, not run: see conftest.MPS_CONV1D_CAP.
+        pytest.param("miso", marks=pytest.mark.expensive),
         pytest.param("chatterbox", marks=pytest.mark.expensive),
-        # Deprecated MLX backends: skipped by default, run with -m deprecated.
-        pytest.param("qwen3", marks=pytest.mark.deprecated),
-        pytest.param("fish", marks=pytest.mark.deprecated),
     ],
 )
 def test_tokenize_segment0(segment0, model, expected_tokenized):
@@ -66,6 +55,7 @@ def test_tokenize_segment0(segment0, model, expected_tokenized):
     sequence = tokenize_segment(segment0, tokenizer)
     sequence.validate(getattr(tokenizer, "span_token_ranges", None))
 
+    assert sequence.seq_id == segment0["segment"].id
     assert sequence.length == expected["length"]
     assert sequence.layout == TokenizedSequenceLayout.from_dict(expected["layout"])
     assert [(span.kind.value, span.start, span.end) for span in sequence.spans] == [

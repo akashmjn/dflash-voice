@@ -1,68 +1,80 @@
 ## Turning speech datasets into teacher-forced training data
 
-Tokenizes conversational speech into per-model token sequences, replays them under teacher forcing to
+Tokenizes speech into per-model token sequences, replays them under teacher forcing to
 capture the model's logits/hiddens, and packs the result into WebDataset shards that `train/` reads.
 Audio and transcripts stay model-independent; each model gets its own artifacts.
 
 ```text
-raw (audio + transcript) ──tokenize──▶ tokenized ──featurize──▶ featurized ──shard──▶ wds shards
+utterance (audio + transcript) ──tokenize──▶ tokenized ──featurize──▶ featurized ──shard──▶ wds shards
 ```
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"           # or ".[dataprep-miso]" — see Environments
-python -m dataprep.cli prepare --model miso   # whole dataset, straight to shards
+uv pip install -e ".[dataprep-chatterbox]"         # or ".[dataprep-miso]" — see Environments
+python -m dataprep.cli prepare --model chatterbox  # whole dataset, straight to shards
 ```
 
 `cli.py` has two verbs; compute stages live in `pipeline.py`, sharding in `shards.py`.
 
 
-| Verb      | What it does                                                                              |
-| --------- | ----------------------------------------------------------------------------------------- |
-| `prepare` | Streams the dataset into WebDataset shards. Nothing per-row hits disk, memory stays flat. |
-| `inspect` | Writes every intermediate per row so you can open a `sequences.pt`. A few rows only.      |
+| Verb      | What it does                                                                                     |
+| --------- | ------------------------------------------------------------------------------------------------ |
+| `prepare` | Streams the dataset into WebDataset shards. Nothing per-utterance hits disk, memory stays flat.  |
+| `inspect` | Writes every intermediate per utterance so you can open a `sequences.pt`. A few utterances only. |
 
 
 ```bash
-python -m dataprep.cli prepare --model miso --rows 60 --slug expresso-rows60
-python -m dataprep.cli inspect --model miso --rows 3 --stage tokenize
+# Emilia (default): --data-files picks the language and the size of the run
+python -m dataprep.cli prepare --model chatterbox --data-files 'Emilia/EN/EN-B0000[0-5]*.tar'
+python -m dataprep.cli prepare --model chatterbox --dataset expresso --rows 60
+python -m dataprep.cli inspect --model chatterbox --rows 3 --stage tokenize
 ```
 
+`amphion/Emilia-Dataset` is gated: `HF_TOKEN` must be set. One EN tar is ~1.7h of audio across ~37
+speakers, so ~60 tars is roughly 100h.
+
 Shards land in `data/sharded_wds/SLUG/`, named per run (`--slug`, default `DATASET-rowsN`) since a
-shard set is defined by the run that produced it. Overwriting one needs `--force`. Failed rows are
-logged to `failures.jsonl` and skipped, so a multi-hour run does not die on one bad row.
+shard set is defined by the run that produced it. Overwriting one needs `--force`. Failed utterances
+are logged to `failures.jsonl` and skipped, so a multi-hour run does not die on one bad clip.
 
-The maintained tokenize/featurize backend is `miso.py`; dataset loading is in a loader like
-`expresso.py` (the one wired up today). Everything else is dataset-agnostic.
+Tokenize/featurize backends are `miso.py` and `chatterbox.py`; dataset loading is a loader under
+`datasources/` (`emilia.py`, `expresso.py`) whose only job is to yield `Segment`s. Everything else is
+dataset-agnostic.
 
-`qwen3` and `fish` live in [`mlx_backends/`](./mlx_backends/README.md) and are **deprecated,
-MLX-only, and unverified** — kept only so `experiments/expresso_nll_entropy/` stays reproducible.
-They warn on use, are skipped by the default test run, and are not expected to survive pipeline
-changes.
+**One utterance is one `Segment`, one sequence, one shard sample.** Emilia is already shaped that
+way; Expresso is not, so its loader cuts multi-turn rows into per-turn segments and synthesizes the
+id and speaker label the other datasets supply natively. Nothing downstream knows the difference.
+
+The MLX `qwen3`/`fish` backends were deleted in this refactor — they were deprecated, unverified, and
+rebuilt structure from span fields that no longer exist. They are preserved on branch
+`akash/dataprep-backup-mlx-0814`; the published metrics under `data/expresso/metrics/` still read
+back, since `model_metrics.py` reads artifacts rather than backends.
 
 ### Notes on the design
 
 `prepare` is one pull-driven chain:
 
 ```text
-HF dataset ──▶ raw example stream ──▶ shard_prepare ──▶ sample stream ──▶ tars
+HF dataset ──▶ Segment stream ──▶ shard_prepare ──▶ sample stream ──▶ tars
 ```
 
-Only lightweight `DecodedExample` records stream off the hub; `shard_prepare` drives tokenize and
-featurize from inside its write loop, so the forward pass runs only for rows it writes. That is what
-lets a row filter — `skip_rows`, which a resumed run needs — drop a row for the cost of one loader
-read instead of a full forward pass.
+Only lightweight `Segment` records stream off the hub; `shard_prepare` drives tokenize and
+featurize from inside its write loop, so the forward pass runs only for segments it writes. That is
+what lets a filter — `skip_ids`, which a resumed run needs — drop a segment for the cost of one
+loader read instead of a full forward pass.
 
-Rows stream in dataset order, and samples are written in the order they arrive. `IterableDataset.shuffle`
-would prefetch from several of the 36 audio files at once and stall the first row for minutes; in-order
-streaming starts in ~10s. Writing in order is also what keeps a run resumable — where a sample lands
-depends only on `(row, seq_id)`, never on buffer state — so mixing is left to the training dataloader,
-which shuffles both shard order and a sample window. `--shuffle-buffer` trades that away for a
-write-time reservoir; it defaults to off.
+Utterances stream in dataset order, and samples are written in the order they arrive.
+`IterableDataset.shuffle` would prefetch from several source files at once and stall the first row
+for minutes; in-order streaming starts in ~10s. Writing in order is also what keeps a run resumable —
+where a sample lands depends only on `seq_id`, never on buffer state — so mixing is left to the
+training dataloader, which shuffles both shard order and a sample window. `--shuffle-buffer` trades
+that away for a write-time reservoir; it defaults to off.
 
-Train/val is assigned by hashing the row id, so every sequence from a row lands on the same side —
-one speaker's turns in a recording cannot straddle the split, and the assignment survives shuffling
-and restarts. Over very few rows this can put everything on one side; `--split-ratio` only tracks the
-requested fraction once there are enough rows.
+Train/val is assigned by hashing the **speaker**, so every utterance from one source recording lands
+on the same side — a voice cannot leak from train into val and flatter the eval, and the assignment
+survives shuffling and restarts. Emilia-YODAS diarizes one recording into `..._SPEAKER_00/01/…`, so
+the hash is taken over that prefix (`shards.split_key`) rather than the full label. The cost is an
+inexact ratio: speaker counts are skewed, so the realized train fraction lands a few points off
+`--split-ratio`, and over very few speakers it can strand one side entirely.
 
 `--include-logits` adds the teacher's per-head distributions as float16 `logits.npy`. Off by default
 at ~16x the size of the hiddens (2.5 GB → ~46 GB for the 60-row set), and only worth it when
@@ -71,13 +83,13 @@ verified bit-identical across all 464 sequences of the 10 analysis rows.
 
 ## Records
 
-Stages pass small self-describing dataclasses, all defined in `common.py` — see it for exact fields
-and on-disk format.
+Stages pass small self-describing dataclasses, all defined in `types.py` — see it for exact fields
+and on-disk format. `common.py` re-exports them, so older `from dataprep.common import …` still works.
 
 
 | Record                          | What it holds                                                                                      |
 | ------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `Segment`                       | One speaker turn — transcript metadata only.                                                       |
+| `Segment`                       | One utterance — id, transcript, speaker, and its own waveform.                                      |
 | `TokenSpanKind`, `TokenSequenceSpan` | Region kind (`text` / `audio` / `special`) and its `[start, end)` range.                           |
 | `TokenizedSequenceLayout`       | Per-model geometry: channel map, which token column each head scores against, hidden/logit widths. |
 | `TokenizedSequence`             | Model-ready `(L, C+1)` tokens, plus layout and spans. Spans are the only record of which columns are live.       |
@@ -90,7 +102,7 @@ predictions live at features `[s-1, e-1)` — use `FeaturizedSequence.feature_sl
 than reimplementing the offset. Samples also carry `head_targets`, since scoring a head means pairing
 it with the right token column (Fish head 0 targets the semantic token, not the audio code).
 
-`common.py` also scores a featurized sequence: `audio_frame_metrics` gives per-frame entropy and NLL
+`utils.py` scores a featurized sequence: `audio_frame_metrics` gives per-frame entropy and NLL
 per codebook, and `nll_summary` reduces it to `semantic` / `audio` / `total` in nats per frame and
 kbit/s.
 
@@ -116,13 +128,12 @@ artifacts — `expresso-rows60` was built from 60 rows and cannot be rebuilt fro
 
 ## Environments
 
-MisoTTS pins Transformers 4.49, the MLX stack pins Transformers 5.6 / `huggingface-hub` 1.5, and
-chatterbox-tts pins Transformers 5.2 / torch 2.6 — all three conflict, so install only one extra per
-environment:
+MisoTTS pins Transformers 4.49 and chatterbox-tts pins Transformers 5.2 / torch 2.6 — they conflict
+with each other and with the MLX stack (`mlx_decode`, Transformers 5.6), so install only one extra
+per environment:
 
 ```bash
-uv pip install -e ".[dataprep-mlx]"         # deprecated Qwen3 / Fish backends
-uv pip install -e ".[dataprep-miso]"        # Miso (replaces the pins above)
+uv pip install -e ".[dataprep-miso]"        # Miso
 uv pip install -e ".[dataprep-chatterbox]"  # Chatterbox AR + Flash
 uv pip install -e ../MisoTTS                # to use a locally cloned MisoTTS
 ```
