@@ -98,7 +98,7 @@ python -m dataprep.cli prepare --model miso --dataset expresso [--rows N] [--slu
 python -m dataprep.cli inspect --model miso --rows 3 [--stage <tokenize|featurize>]
 
 # MLX inference benchmark
-python mlx_decode/bench.py --model <qwen3|fish|miso>
+python mlx_decode/bench.py bench --model <qwen3|voxtral|fish|miso|all>
 
 # tests — `-m 'not expensive'` is the pytest default (skips full-model-loading tests)
 pytest -v mlx_decode/tests/test_decode_parity.py

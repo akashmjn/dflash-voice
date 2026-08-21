@@ -14,6 +14,9 @@ pytestmark = pytest.mark.integration
 
 # Our port may be faster, but should never be meaningfully slower than the reference.
 MAX_SLOWDOWN = 1.10
+# MLX's allocator leaves whichever model ran most recently at an advantage, so
+# both sides get a quiet gap to settle before they are timed.
+SETTLE_SECONDS = 2.0
 WARMUP_TEXT = "Hello."
 
 
@@ -45,6 +48,19 @@ BACKENDS = {
         ),
         ref_kwargs=dict(lang_code="english"),
     ),
+    "voxtral": Backend(
+        model_id="mlx-community/Voxtral-4B-TTS-2603-mlx-6bit",
+        loader="mlx_decode.voxtral",
+        sample_rate=24000,
+        gen_kwargs=dict(
+            text="Hello, this is a quick Voxtral TTS test on Apple Silicon.",
+            voice="casual_male",
+        ),
+        # The flow-matching head samples fresh noise per frame, so there is no
+        # temperature to zero out -- pin the seed instead.
+        needs_seed=True,
+        supports_streaming=False,
+    ),
     "fish": Backend(
         model_id="mlx-community/fish-audio-s2-pro-8bit",
         loader="mlx_decode.fish",
@@ -67,20 +83,29 @@ def backend(request) -> Backend:
 
 @pytest.fixture(scope="module")
 def ref_model(backend):
+    import mlx.core as mx
     from mlx_audio.tts.utils import load_model
 
     model = load_model(backend.model_id)
     _warmup(model, backend, **backend.ref_kwargs)
-    return model
+    yield model
+    # Backends are timed on wall-clock, so one backend's weights must not still
+    # be resident while the next is measured.
+    del model
+    mx.clear_cache()
 
 
 @pytest.fixture(scope="module")
 def our_model(backend):
     import importlib
 
+    import mlx.core as mx
+
     model = importlib.import_module(backend.loader).load_model(backend.model_id)
     _warmup(model, backend)
-    return model
+    yield model
+    del model
+    mx.clear_cache()
 
 
 def _warmup(model, backend, **extra):
@@ -106,6 +131,22 @@ def _run(model, backend, **kwargs):
     return results, audio, elapsed
 
 
+def _timed_run(model, backend, **kwargs):
+    """Let the machine settle, then time one generation."""
+    import mlx.core as mx
+
+    mx.clear_cache()
+    time.sleep(SETTLE_SECONDS)
+    return _run(model, backend, **kwargs)
+
+
+def _time_parity(our_model, ref_model, backend, our_kwargs, ref_kwargs):
+    """Time both implementations, each after its own settle gap."""
+    return _timed_run(our_model, backend, **our_kwargs), _timed_run(
+        ref_model, backend, **ref_kwargs
+    )
+
+
 def _assert_time_parity(our_seconds, ref_seconds):
     assert our_seconds <= ref_seconds * MAX_SLOWDOWN, (
         f"ours took {our_seconds:.2f}s vs mlx-audio {ref_seconds:.2f}s "
@@ -116,8 +157,9 @@ def _assert_time_parity(our_seconds, ref_seconds):
 def test_non_stream_parity(backend, ref_model, our_model):
     kwargs = dict(backend.gen_kwargs, stream=False)
     ref_kwargs = dict(kwargs, **backend.ref_kwargs)
-    ref, ref_audio, ref_seconds = _run(ref_model, backend, **ref_kwargs)
-    ours, our_audio, our_seconds = _run(our_model, backend, **kwargs)
+    (ours, our_audio, our_seconds), (ref, ref_audio, ref_seconds) = _time_parity(
+        our_model, ref_model, backend, kwargs, ref_kwargs
+    )
 
     assert len(ref) == 1
     assert len(ours) == 1
@@ -138,8 +180,9 @@ def test_stream_parity(backend, ref_model, our_model):
 
     kwargs = dict(backend.gen_kwargs, stream=True, streaming_interval=0.32)
     ref_kwargs = dict(kwargs, **backend.ref_kwargs)
-    _, ref_audio, ref_seconds = _run(ref_model, backend, **ref_kwargs)
-    _, our_audio, our_seconds = _run(our_model, backend, **kwargs)
+    (_, our_audio, our_seconds), (_, ref_audio, ref_seconds) = _time_parity(
+        our_model, ref_model, backend, kwargs, ref_kwargs
+    )
 
     assert ref_audio.size > 0
     assert our_audio.shape == ref_audio.shape

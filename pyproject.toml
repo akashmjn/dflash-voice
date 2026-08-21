@@ -32,6 +32,8 @@ mlx_decode = [
     "mlx-audio==0.4.4",
     "transformers==5.6.0",
     "huggingface-hub==1.5.0",
+    # Voxtral builds its prompt with the Mistral speech tokenizer.
+    "mistral-common[audio]>=1.11.7",
 ]
 
 # Chatterbox AR + Flash tokenize. chatterbox-tts pins transformers==5.2.0 and
