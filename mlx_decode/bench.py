@@ -29,6 +29,8 @@ from tqdm import tqdm
 from mlx_decode import GenerationProfile
 
 
+WARMUP_DIR = Path(__file__).resolve().parent / "warmup"
+
 MODELS = {
     "qwen3": {
         "frame_rate_hz": 12.5,
@@ -62,6 +64,24 @@ MODELS = {
         "generate": {
             "voice": "casual_male",
             "max_tokens": 1024,
+        },
+    },
+    # Single-codebook AR: backbone generations FSQ codes, no separate audio token decoder.
+    "cbox-ar": {
+        "frame_rate_hz": 25.0,
+        "decoder_iterations": None,
+        "module": "cbox_ar",
+        "model_id": "mlx-community/Chatterbox-TTS-8bit",
+        # The checkpoint carries no conds.safetensors, so a voice must be
+        # supplied. Encoded once at load, outside the timed region.
+        "load_kwargs": {"ref_audio": str(WARMUP_DIR / "hello-1.wav")},
+        "generate": {
+            "temperature": 0.8,
+            "min_p": 0.05,
+            "top_p": 1.0,
+            "repetition_penalty": 1.2,
+            "cfg_weight": 0.5,
+            "max_tokens": 1000,
         },
     },
     "miso": {
@@ -101,7 +121,6 @@ DEFAULT_OUTPUT_DIR = Path("mlx_decode/output")
 # Two-speaker priming turns for miso, at its native 24 kHz.
 # Miso being a base model appears to be unstable when generating from empty context 
 # some preconditioning makes better generations -- at the cost of comparable timings.
-WARMUP_DIR = Path(__file__).resolve().parent / "warmup"
 MISO_CONTEXT = [
     (0, "Okay we're recording! Let's get into it.", str(WARMUP_DIR / "warmup_spk0.wav")),
     (1, "Sounds good, ready when you are!", str(WARMUP_DIR / "warmup_spk1.wav")),
@@ -236,7 +255,9 @@ def _run(
     spec: dict[str, Any],
 ) -> list[str]:
     print(f"Loading {model_id}")
-    model = importlib.import_module(f"mlx_decode.{name}").load_model(model_id)
+    module = spec.get("module", name)
+    load = importlib.import_module(f"mlx_decode.{module}").load_model
+    model = load(model_id, **spec.get("load_kwargs", {}))
     if warmup:
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 
