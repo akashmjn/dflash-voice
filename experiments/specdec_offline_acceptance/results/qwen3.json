@@ -1,0 +1,61 @@
+{
+  "draft_artifact": "qwen3-0.6b",
+  "target_artifact": "qwen3-1.7b",
+  "draft_model": "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-8bit",
+  "target_model": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
+  "rows": 10,
+  "seed": 0,
+  "gammas": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    7
+  ],
+  "cb0": {
+    "axis": "cb0",
+    "frames": 55695,
+    "sequences": 465,
+    "alpha": 0.7621,
+    "tau": {
+      "1": 1.762,
+      "2": 2.343,
+      "3": 2.786,
+      "4": 3.123,
+      "5": 3.38,
+      "7": 3.725
+    }
+  },
+  "depth": {
+    "axis": "depth",
+    "frames_per_level": 55695,
+    "sequences": 465,
+    "alpha_per_level": [
+      0.674,
+      0.6738,
+      0.6648,
+      0.6504,
+      0.6487,
+      0.6575,
+      0.6505,
+      0.6537,
+      0.6573,
+      0.6606,
+      0.6622,
+      0.658,
+      0.6622,
+      0.6603,
+      0.6614
+    ],
+    "alpha": 0.6597,
+    "tau": {
+      "1": 1.66,
+      "2": 2.095,
+      "3": 2.382,
+      "4": 2.571,
+      "5": 2.696,
+      "7": 2.833
+    }
+  }
+}
