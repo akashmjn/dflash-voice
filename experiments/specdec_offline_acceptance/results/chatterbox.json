@@ -1,0 +1,30 @@
+{
+  "draft_model": "ResembleAI/chatterbox-flash",
+  "target_model": "ResembleAI/chatterbox",
+  "artifact": "chatterbox",
+  "rows": 10,
+  "seed": 0,
+  "gammas": [
+    1,
+    2,
+    3,
+    4,
+    5,
+    7
+  ],
+  "cb0": {
+    "axis": "cb0",
+    "frames": 93272,
+    "sequences": 457,
+    "alpha": 0.7664,
+    "tau": {
+      "1": 1.766,
+      "2": 2.354,
+      "3": 2.804,
+      "4": 3.149,
+      "5": 3.413,
+      "7": 3.771
+    },
+    "live_vocab": 6562
+  }
+}
