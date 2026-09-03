@@ -22,7 +22,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from acceptance import (  # noqa: E402
+from simulate_acceptance import (  # noqa: E402
     GAMMAS,
     FeaturizedSequence,
     TokenSpanKind,
