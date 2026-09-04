@@ -62,9 +62,11 @@ data/
 │   │   ├── features.pt              ragged list[{logits, hiddens}] of length L-1
 │   │   ├── metadata.json              same shape; layout also carries hidden/logit dims
 │   │   └── kv_context.pt             only with --dump-kv
-│   └── metrics/MODEL/ROW/           written by experiments/expresso_nll_entropy/model_metrics.py
-│       ├── MODEL_metrics.npz
-│       └── MODEL_metrics.json
+│   ├── metrics/MODEL/ROW/           written by experiments/expresso_nll_entropy/model_metrics.py
+│   │   ├── MODEL_metrics.npz
+│   │   └── MODEL_metrics.json
+│   └── specdec_offline/MODEL/ROW/   written by experiments/specdec_offline_acceptance/
+│       └── features.pt              reference-conditioned logits; Flash writes features_bN.pt per block
 └── sharded_wds/SLUG/               written by dataprep/shards.py, e.g. sharded_wds/expresso-rows60/
     ├── dataset_info.json
     ├── shards.json
@@ -72,7 +74,7 @@ data/
     └── val/MODEL_val_NNNNN.tar
 ```
 
-`MODEL` directories in practice include per-size variants (e.g. `qwen3-0.6b`, `qwen3-1.7b`) alongside the bare `qwen3`/`miso`/`fish` names.
+`MODEL` directories in practice include per-size variants (e.g. `qwen3-0.6b`, `qwen3-1.7b`) alongside the bare `qwen3`/`miso`/`fish` names. The Chatterbox specdec experiment dumps target and drafts alike (`chatterbox-ar`, `-flash`, `-turbo`, `-nano`) under `specdec_offline/` rather than `featurized/`, off the `chatterbox` tokenized tree: they condition on fixed reference clips, not each utterance's own audio, so they must stay out of `featurized/`, which `model_metrics.py` globs for models to score.
 
 ## Environments (mutually exclusive extras)
 

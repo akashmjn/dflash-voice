@@ -1,0 +1,24 @@
+{
+  "ex01": {
+    "file": "ex01.wav",
+    "source": {
+      "dataset": "expresso",
+      "row": "7",
+      "segment_id": 21
+    },
+    "duration_s": 10.0,
+    "sample_rate": 16000,
+    "text": "Uh, I do not know. No, I lie. I know what New York City is. You can go to New York City and get a dollar slice. Hey, do you know where Puerto Vallarta is?"
+  },
+  "ex02": {
+    "file": "ex02.wav",
+    "source": {
+      "dataset": "expresso",
+      "row": "8",
+      "segment_id": 53
+    },
+    "duration_s": 9.48,
+    "sample_rate": 16000,
+    "text": "Morgan Freeman is an American actor who's known for being in the Shawshank Redemption and doing an incredible amount of voiceover work. Who's Will Smith?"
+  }
+}

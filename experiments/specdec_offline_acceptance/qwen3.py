@@ -23,6 +23,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from simulate_acceptance import (  # noqa: E402
+    FEATURIZED_STAGE,
     GAMMAS,
     FeaturizedSequence,
     TokenSpanKind,
@@ -58,8 +59,8 @@ def measure_cb0(args: argparse.Namespace, rng: torch.Generator) -> dict:
     total_sequences = 0
 
     for row in range(args.rows):
-        (draft,), _ = load_heads(resolve_row(args.draft_artifact, row, args.dataset), [0])
-        (target,), used = load_heads(resolve_row(args.target_artifact, row, args.dataset), [0])
+        (draft,), _ = load_heads(resolve_row(args.draft_artifact, row, args.dataset, FEATURIZED_STAGE), [0])
+        (target,), used = load_heads(resolve_row(args.target_artifact, row, args.dataset, FEATURIZED_STAGE), [0])
 
         row_hits, row_frames = count_accepted(draft, target, rng)
         hits += row_hits
@@ -82,8 +83,8 @@ def measure_depth(args: argparse.Namespace, rng: torch.Generator) -> dict:
     total_sequences = 0
 
     for row in range(args.rows):
-        draft_levels, _ = load_heads(resolve_row(args.draft_artifact, row, args.dataset), heads)
-        target_levels, used = load_heads(resolve_row(args.target_artifact, row, args.dataset), heads)
+        draft_levels, _ = load_heads(resolve_row(args.draft_artifact, row, args.dataset, FEATURIZED_STAGE), heads)
+        target_levels, used = load_heads(resolve_row(args.target_artifact, row, args.dataset, FEATURIZED_STAGE), heads)
 
         for level, (draft, target) in enumerate(zip(draft_levels, target_levels)):
             level_hits, level_frames = count_accepted(draft, target, rng)

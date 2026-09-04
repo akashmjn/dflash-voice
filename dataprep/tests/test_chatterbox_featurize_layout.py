@@ -29,12 +29,12 @@ pytest.importorskip(
 
 from chatterbox.models.t3.modules.t3_config import T3Config  # noqa: E402
 
-from dataprep.chatterbox import COND_PREFIX_LEN, ChatterboxFeaturizer  # noqa: E402
+from dataprep.chatterbox import cond_prefix_len, ChatterboxFeaturizer  # noqa: E402
 
 HIDDEN_DIM = 8
 TEXT_LEN = 5
 AUDIO_FRAMES = 7
-
+COND_PREFIX_LEN = cond_prefix_len(T3Config.english_only(), AUDIO_FRAMES)
 
 class _FakeT3:
     """Zero embeddings of the right width; enough to reach the guards."""
@@ -112,7 +112,7 @@ def test_wrong_conditioning_width_is_rejected(sequence):
     """
     featurizer = ChatterboxFeaturizer(model=_FakeT3(cond_len=COND_PREFIX_LEN - 1))
     context = SequenceEmbeddingContext(values={"speaker_emb": torch.zeros(256)})
-    with pytest.raises(ValueError, match="COND_PREFIX_LEN"):
+    with pytest.raises(ValueError, match="embeddings length"):
         featurizer.featurize(sequence, context=context)
 
 

@@ -5,13 +5,14 @@ distribution, verify against the target under the speculative sampling criterion
 and count acceptances over every frame in parallel. alpha = accepted / frames,
 extrapolated to tau(gamma) under an i.i.d. assumption.
 
-Measures Chatterbox Flash drafting Chatterbox AR. Single-codebook, so there is one
-axis and no depth decoder. AR is the ``chatterbox`` artifact from dataprep; Flash is
-``chatterbox-flash``, written by ``chatterbox_dump_logits.py``, which must run first.
-The two share one tokenized dump. See README.md for what this does and does not measure.
+Measures Chatterbox Flash, Turbo or Nano drafting Chatterbox AR. All single-codebook,
+so there is one axis and no depth decoder. Target and drafts are both written by
+``dump_logits.py``, which must run first; all share one tokenized dump. See README.md
+for what this does and does not measure.
 
 ```bash
 python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --block-size 4
+python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --draft turbo
 ```
 
 ``qwen3.py`` reuses the sampling core here for a multi-codebook model.
@@ -48,13 +49,27 @@ LIVE_VOCAB_SIZE = 6561
 HEAD_VOCAB_SIZE = 8194
 STOP_SPEECH_TOKEN = 6562
 
-#: AR target from dataprep; Flash draft from chatterbox_dump_logits.py. Tokens are
-#: shared, so both read the ``chatterbox`` tokenized dump.
-TARGET_ARTIFACT = "chatterbox"
-DRAFT_ARTIFACT = "chatterbox-flash"
+#: Target and drafts alike come from dump_logits.py, all conditioned on the same
+#: per-speaker reference clips. Tokens are shared, so all read the ``chatterbox``
+#: tokenized dump.
+TOKENIZED_ARTIFACT = "chatterbox"
+TARGET_ARTIFACT = "chatterbox-ar"
 
-#: Block size the Flash release decodes with (resemble-ai/chatterbox-flash).
-DEFAULT_BLOCK_SIZE = 16
+#: This experiment keeps its dumps out of dataprep's ``featurized/`` tree, where
+#: model_metrics.py would discover them. ``qwen3.py`` reads dataprep's tree instead.
+SPECDEC_STAGE = "specdec_offline"
+FEATURIZED_STAGE = "featurized"
+
+#: The Flash release decodes 16 tokens a block, too wide to accept here (alpha
+#: falls off with block size); 4 is the middle of the 1-8 range this sweeps.
+DEFAULT_BLOCK_SIZE = 4
+
+#: HF repo per draft, for the results JSON.
+DRAFT_MODELS = {
+    "flash": "ResembleAI/chatterbox-flash",
+    "turbo": "ResembleAI/chatterbox-turbo",
+    "nano": "ResembleAI/chatterbox-nano",
+}
 
 app = typer.Typer(
     add_completion=False,
@@ -167,12 +182,14 @@ def count_accepted(
 # ---------------------------------------------------------------------------
 
 
-def resolve_row(artifact: str, row: int, dataset: str = "expresso") -> Path:
-    """Featurized dump directory for one dataset row, or a usage error."""
-    path = REPO_ROOT / "data" / dataset / "featurized" / artifact / str(row)
+def resolve_row(
+    artifact: str, row: int, dataset: str = "expresso", stage: str = SPECDEC_STAGE
+) -> Path:
+    """Dump directory for one dataset row, or a usage error."""
+    path = REPO_ROOT / "data" / dataset / stage / artifact / str(row)
     if not path.exists():
         raise SystemExit(
-            f"no featurized dump at {path}\n"
+            f"no {stage} dump at {path}\n"
             "  Needs teacher-forced logit dumps for both model variants."
         )
     return path
@@ -275,6 +292,28 @@ def live_token_mask(vocab_size: int = HEAD_VOCAB_SIZE) -> torch.Tensor:
     return mask
 
 
+def pad_to_head(logits: torch.Tensor, width: int = HEAD_VOCAB_SIZE) -> torch.Tensor:
+    """Right-pad a narrower head to ``width`` with ``-inf``.
+
+    Turbo and Nano emit 6563 logits against AR's 8194. The extra ids are dead on
+    both sides, but the tensors must agree in width to be compared.
+    """
+    if logits.shape[-1] >= width:
+        return logits
+    pad = logits.new_full((*logits.shape[:-1], width - logits.shape[-1]), float("-inf"))
+    return torch.cat([logits, pad], dim=-1)
+
+
+def load_draft_logits(draft_dir: Path) -> list[list[torch.Tensor]]:
+    """Per-sequence draft logits from a dump that carries its own spans.
+
+    Turbo and Nano condition on a variable-length speech prompt, so their sequences
+    do not share AR's geometry and spans must come from the draft's own metadata.
+    """
+    sequences, _ = FeaturizedSequence.load_all(draft_dir)
+    return [[pad_to_head(c) for c in audio_logits(f)] for f in sequences]
+
+
 def load_flash_logits(
     flash_dir: Path, target_dir: Path, name: str
 ) -> list[list[torch.Tensor]]:
@@ -287,7 +326,7 @@ def load_flash_logits(
     if not path.exists():
         raise SystemExit(
             f"no Flash logits at {path}\n"
-            "  Run: python experiments/specdec_offline_acceptance/chatterbox_dump_logits.py"
+            "  Run: python experiments/specdec_offline_acceptance/dump_logits.py"
         )
     sequences, _ = FeaturizedSequence.load_all(target_dir)
     raw = torch.load(path, weights_only=False)
@@ -311,7 +350,7 @@ def measure(
     target_artifact: str,
     draft_artifact: str,
     dataset: str,
-    flash_features: str,
+    flash_features: str | None,
     rng: torch.Generator,
 ) -> dict:
     """Acceptance over the backbone axis, plus both sides' NLL on the same frames."""
@@ -326,9 +365,14 @@ def measure(
         row_dir = resolve_row(target_artifact, row, dataset)
         flash_dir = resolve_row(draft_artifact, row, dataset)
         target_rows, used = load_row_logits(row_dir)
-        draft_rows = load_flash_logits(flash_dir, row_dir, flash_features)
+        # Flash dumps bare tensors per block size; the others dump full sequences.
+        draft_rows = (
+            load_flash_logits(flash_dir, row_dir, flash_features)
+            if flash_features
+            else load_draft_logits(flash_dir)
+        )
         sequences, _ = TokenizedSequence.load_all(
-            REPO_ROOT / "data" / dataset / "tokenized" / target_artifact / str(row)
+            REPO_ROOT / "data" / dataset / "tokenized" / TOKENIZED_ARTIFACT / str(row)
         )
 
         draft = flatten(draft_rows)
@@ -354,39 +398,47 @@ def measure(
 @app.command()
 def main(
     rows: int = typer.Option(10, help="Use rows 0..N-1."),
+    draft: str = typer.Option("flash", help="Draft model: flash, turbo or nano."),
     block_size: int = typer.Option(
-        DEFAULT_BLOCK_SIZE, help="Read the Flash dump for this block size."
+        DEFAULT_BLOCK_SIZE, help="Flash only: read the dump for this block size."
     ),
     target_artifact: str = typer.Option(
-        TARGET_ARTIFACT, help="AR featurized subdir; also supplies the tokenized dump."
+        TARGET_ARTIFACT, help="AR target subdir under specdec_offline/."
     ),
-    draft_artifact: str = typer.Option(DRAFT_ARTIFACT, help="Flash featurized subdir."),
+    draft_artifact: Optional[str] = typer.Option(
+        None, help="Draft subdir under specdec_offline/ (default: chatterbox-DRAFT)."
+    ),
     dataset: str = typer.Option("expresso", help="Dataset slug for artifact paths."),
     seed: int = typer.Option(0, help="Sampling RNG seed."),
     out: Optional[Path] = typer.Option(
-        None, help="Results JSON (default: results/chatterbox_bN.json)."
+        None, help="Results JSON (default: results/chatterbox_{bN,DRAFT}.json)."
     ),
 ) -> None:
-    """Score one block size and write its results JSON."""
+    """Score one draft model and write its results JSON."""
     if rows < 1:
         raise typer.BadParameter("--rows wants a positive row count")
+    if draft not in DRAFT_MODELS:
+        raise typer.BadParameter(f"--draft wants one of {', '.join(DRAFT_MODELS)}")
     if block_size < 1:
         raise typer.BadParameter("--block-size wants a positive integer")
 
-    flash_features = f"features_b{block_size}.pt"
-    # Default the output per block size, so a sweep cannot overwrite its own runs.
-    out = out or Path(__file__).with_name("results") / f"chatterbox_b{block_size}.json"
+    # Only Flash dumps per block size.
+    flash_features = f"features_b{block_size}.pt" if draft == "flash" else None
+    tag = f"b{block_size}" if draft == "flash" else draft
+    draft_artifact = draft_artifact or f"chatterbox-{draft}"
+    # Default the output per draft, so a sweep cannot overwrite its own runs.
+    out = out or Path(__file__).with_name("results") / f"chatterbox_{tag}.json"
 
-    print("Chatterbox Flash drafting Chatterbox AR:")
+    print(f"Chatterbox {draft.capitalize()} drafting Chatterbox AR:")
     results = {
-        "draft_model": "ResembleAI/chatterbox-flash",
+        "draft_model": DRAFT_MODELS[draft],
         "target_model": "ResembleAI/chatterbox",
         "target_artifact": target_artifact,
         "draft_artifact": draft_artifact,
         "rows": rows,
         "seed": seed,
         "gammas": list(GAMMAS),
-        "block_size": block_size,
+        **({"block_size": block_size} if draft == "flash" else {}),
         "cb0": measure(
             rows, target_artifact, draft_artifact, dataset, flash_features,
             torch.Generator().manual_seed(seed),

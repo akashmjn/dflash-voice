@@ -1,72 +1,73 @@
-# Offline specdec acceptance ratio estimation
+# Estimating specdec acceptance stats offline
 
-How well does [Chatterbox Flash](https://huggingface.co/ResembleAI/chatterbox-flash), a block-diffusion decoder, draft for [Chatterbox AR](https://huggingface.co/ResembleAI/chatterbox)? Both are single-codebook, so there is one token sequence to speculate on and no separate audio token decoder (RVQ models like Qwen3-TTS).
+What do specdec acceptance rates look like for TTS models that decode audio tokens?   
+  
+Here we look the  [Chatterbox](https://github.com/resemble-ai/chatterbox) model family, whose autoregressive backbones decode a single stream of FSQ tokens. This is the closest to an LLM making it the most tractable for specdec, unlike multi-layer RVQ models like Qwen3-TTS with dual autoregressive decoders.
 
 ## Method
 
-For efficiency, acceptance stats are simulated by running **one specdec step** from offline logit
-dumps. Both models are teacher-forced over the same ground-truth sequence, so every frame `t`
-yields a pair of next-token distributions for `x_t+1`. Sample from the draft, verify against the
-target — accept `x` with probability `min(1, target(x) / draft(x))` — over all frames in parallel:
+For efficiency, acceptance stats are simulated by running **one specdec step** from offline logit dumps. Both models are  
+teacher-forced over the same ground-truth sequence, so every frame `t` yields a pair of next-token distributions for `x_t+1`. We then run a specdec draft + verification step over all frames in parallel - accepting `x` with probability `min(1, target(x) / draft(x))` .
 
 ```
-α = accepted tokens / frames
+α = accepted tokens / total frames
 τ(γ) = (1 − α^(γ+1)) / (1 − α)
 ```
 
-`τ(γ)` is the expected tokens per verify round at draft block `γ`, assuming acceptance is i.i.d.  
-across the γ positions.
+`τ(γ)` is the expected tokens per specdec step extrapolated from `α` to draft block size `γ` (assuming i.i.d. acceptance).
 
+Measured on the [Expresso](https://huggingface.co/datasets/Zackh/expresso-contextual) dataset rows 0–9: 457 sequences, 93,272 frames (~3700s). Vocab size is 6562 FSQ + EOS tokens.
 
+## Models
 
-Chatterbox-Flash is a block diffusion dLLM: the speech stream is cut into blocks of `B`, and each cumulative speech block serves as context to predict a block of mask tokens in parallel - simulating blockwise autoregressive inference (see `chatterbox_dump_logits.py`).
+The target is  [Chatterbox AR](https://github.com/resemble-ai/chatterbox) (Llama-style backbone, ~503M, EN-only model). Three drafts, all sharing FSQ code tokens from the [S3 tokenizer V2](https://github.com/xingchensong/S3Tokenizer):
 
-> Note that Cbox-Flash (draft) and Cbox-AR (target) models near-identical in size, so there is no compute win on offer. We are getting a sense for what accept rates over FSQ audio tokens looks like for two models sharing the same tokenizer.
-
-
+-  [Flash](https://huggingface.co/ResembleAI/chatterbox-flash) — block-diffusion dLLM, ~503M backbone. The speech stream is cut into blocks of `B`; each cumulative block conditions a parallel prediction of the next block of mask tokens, simulating blockwise autoregressive inference (see `dump_logits.py`). Near-identical in size to the target, so there is no compute win — it is here to read accept rates over FSQ tokens between two models sharing a tokenizer.
+-  [Turbo](https://huggingface.co/ResembleAI/chatterbox-turbo)  — causal, GPT-2 medium, **362M** backbone (0.72× the target).
+-  [Nano](https://huggingface.co/ResembleAI/chatterbox-nano)  — causal, GPT-2 small, **130M** backbone (0.26× the target).
 
 ## Results
 
-Acceptance rates for different masked block sizes `B` are relatively low, dropping off sharply with block size.
+All drafts on the same frames, against a Chatterbox-AR target NLL of 4.356 nats/frame; `Δ` is the draft's excess over it. τ(γ) extrapolates accepted length to draft block size `γ`; for Flash, γ below its dump block `B` is blanked, since it cannot draft a narrower block.
 
 
-| Block `B` | α (accept rate) | τ(γ=B) (accept length) | Draft NLL | NLL Δ vs Target |
-| --------- | --------------- | ---------------------- | --------- | --------------- |
-| 1         | 0.763           | 1.76                   | 4.363     | +0.084          |
-| 2         | 0.625           | 2.02                   | 4.780     | +0.500          |
-| 4         | 0.498           | 1.93                   | 5.262     | +0.983          |
-| 8         | 0.384           | 1.62                   | 5.786     | +1.507          |
+| Draft     | α (accept rate) | τ(γ=2) (accept length) | τ(γ=4) (accept length) | Draft NLL | NLL Δ vs Target |
+| --------- | --------------- | ---------------------- | ---------------------- | --------- | --------------- |
+| Flash B=1 | 0.769           | 2.36                   | 3.16                   | 4.419     | +0.063          |
+| Flash B=2 | 0.630           | 2.03                   | 2.44                   | 4.826     | +0.470          |
+| Flash B=4 | 0.500           | —                      | 1.94                   | 5.304     | +0.949          |
+| Flash B=8 | 0.385           | —                      | —                      | 5.837     | +1.481          |
+| Turbo     | 0.646           | 2.06                   | 2.51                   | 4.751     | +0.395          |
+| Nano      | 0.614           | 1.99                   | 2.36                   | 4.891     | +0.535          |
 
 
-Measured on Expresso dataset rows 0–9: 457 sequences, 93,272 frames. Vocab size is 6562 FSQ + EOS tokens. Target model (Cbox-AR) NLL is 4.279 nats/frame; `Δ` is the draft's excess over it. 
+**Flash acceptance falls off sharply with block size,** and τ peaks at B=2 — widening the block past that costs acceptance faster than it gains positions. B=1 is the control: it matches autoregressive token-by-token prediction. Turbo and Nano are plain causal dumps with no block to sweep.
 
-**B=1 is the control.** This closely matches autoregressive token-by-token predictions.
+**Acceptance tracks draft quality (NLL).** Turbo models the audio better than Nano (NLL 4.75 vs 4.89) and is accepted more often (α 0.65 vs 0.61). All drafts are slightly worse than the target's own 4.356.
 
-**τ peaks at B=2 and falls after.** Widening the block costs acceptance faster than it gains positions past B=2.
+**Takeaway.** Nano looks like a reasonable draft for the size on offer: at 0.26× the backbone it still accepts α ≈ 0.61, which is where a real speedup comes from. Flash's near-target α at B=1 buys nothing, since it is the same size as the target — a block-diffusion draft would only pay off if trained as a draft against a smaller backbone. This is an offline read of acceptance stats, not an end-to-end speedup measurement.
 
 ## Caveats
 
-- **One denoising step per block.** Cbox-Flash is trained to run up to 10 unmasking steps per block of 16 tokens at inference. Here we are only measuring acceptance after one step - which is a lower bound. DFlash draft models for LLMs are explicitly trained with an objective matching the inference setting, weighting earlier tokens higher.
+- **One denoising step per block.** Cbox-Flash is trained to run up to 10 unmasking steps per block of 16 tokens at inference. Here we are only measuring acceptance after one step - which is a lower bound. Effective draft models like DFlash for LLMs are explicitly trained with an objective matching the inference setting, weighting earlier tokens higher.
 - **Teacher-forced prefix.** Each block conditions on ground-truth history, not on what the previous block actually drafted.
+- **Fixed audio prompts.** Every chatterbox model requires an audio prompt for the reference speaker. Test above conditions on one reference utterance per speaker, checked in under `expresso_speaker_prompts/` (`ex01` cut from row 7, `ex02` from row 8) as Expresso is the same two speakers throughout.
 
 
 
 ## Reproduce
 
-Dataprep featurizes the AR checkpoint only (the `chatterbox` artifact), so Flash logits are
-dumped separately into their own `chatterbox-flash` artifact, off the tokenized dump the two
-share. That needs the `dataprep-chatterbox` extra; the acceptance script itself needs only
-torch, on CPU.
+You need extra `uv pip install -e ".[dataprep-chatterbox]"`  (from repo root).
+
+Then from the repo root, `--model` selects the target/draft to dump, `--draft` selects the draft to score:
 
 ```bash
-python experiments/specdec_offline_acceptance/chatterbox_dump_logits.py --rows 10 --block-sizes 1,2,4,8
-python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --block-size 4
+python experiments/specdec_offline_acceptance/dump_logits.py --rows 10 --model ar
+python experiments/specdec_offline_acceptance/dump_logits.py --rows 10 --model flash --block-sizes 1,2,4,8
+python experiments/specdec_offline_acceptance/dump_logits.py --rows 10 --model turbo   # and nano
+python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --draft turbo
 ```
 
-`--block-sizes` takes a CSV; each size writes `featurized/chatterbox-flash/ROW/features_bN.pt`,
-which `--block-size` reads back into `results/chatterbox_bN.json` (gitignored).
-
-Both scripts assume dataprep's `data/DATASET/{tokenized,featurized}/MODEL/ROW/` layout — AR under
-`chatterbox`, Flash under `chatterbox-flash`, sharing one tokenized directory. See [dataprep](../../dataprep/README.md#on-disk-layout) for the layout.
+Tokens come from `data/DATASET/tokenized/chatterbox/ROW/`; logits land in `specdec_offline/chatterbox-{ar,flash,turbo,nano}/ROW/`. Results write to `results/chatterbox_{bN,turbo,nano}.json` (gitignored).
 
 [Qwen3-TTS results](qwen3.md) cover the same measurement on a multi-codebook model.

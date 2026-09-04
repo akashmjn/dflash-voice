@@ -22,6 +22,7 @@ export the empty text column.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -54,12 +55,23 @@ T3_FILENAME = "t3_cfg.safetensors"
 #: Exaggeration scalar for the conditioning encoder; 0.5 is neutral.
 DEFAULT_EMOTION_ADV = 0.5
 
-#: T3's conditioning prefix width, containing audio prompt. The same length 
-#: for every utterance, containing: 1 speaker + 0 clap (unimplemented) 
-#: + 32 perceiver queries + 1 emotion. The perceiver has a fixed
-#: bank of 32 queries, so any audio prompt length maps to 32 frames. See
-#: ``chatterbox.models.t3.modules.cond_enc.T3CondEnc.forward``.
-COND_PREFIX_LEN = 34
+
+def cond_prefix_len(hp: T3Config, prompt_frames: int) -> int:
+    """Conditioning frames ``T3CondEnc.forward`` emits under ``hp``.
+
+    For Chatterbox AR/Flash conditioning prefix is 1 (speaker embedding) +
+    32 (perceiver queries over audio prompt) + 1 (emotion) = 34.
+    The perceiver collapses any audio prompt to 32 queries but (Turbo, Nano) directly 
+    use audio `prompt_frames`, so tokenize and featurize must compute it the same way.
+    """
+    prompt = 32 if hp.use_perceiver_resampler else prompt_frames
+    return 1 + prompt + int(bool(hp.emotion_adv))
+
+
+def num_audio_prompt_frames(hp: T3Config, audio_frames: int) -> int:
+    """Speech-prompt frames taken from an utterance's own audio, as featurize does."""
+    return min(hp.speech_cond_prompt_len or 0, audio_frames)
+
 
 #: Drop a segment with more than this many 25 Hz frames per text token: the
 #: transcript does not cover the audio, and training on it teaches the model to
@@ -68,6 +80,20 @@ COND_PREFIX_LEN = 34
 #: legitimately reach ~20. The floor spares short clips, whose ratio is noisy.
 MAX_FRAMES_PER_TEXT_TOKEN = 60.0
 MIN_FRAMES_FOR_RATIO_CHECK = 300
+
+
+@dataclass(frozen=True)
+class AudioPrompt:
+    """A reference utterance to condition on, in place of the utterance's own audio."""
+
+    speech_tokens: torch.Tensor  # (F,) S3 ids
+    speaker_emb: torch.Tensor  # (256,) GE2E
+
+    def prompt_tokens(self, hp: T3Config) -> torch.Tensor:
+        """The leading ids the conditioning encoder takes, cropped as featurize does."""
+        return self.speech_tokens[
+            : num_audio_prompt_frames(hp, int(self.speech_tokens.numel()))
+        ]
 
 
 def _span_token_ranges(hp: T3Config) -> TokenSpanIdRange:
@@ -285,6 +311,7 @@ class ChatterboxFeaturizer:
         *,
         include_kv: bool = False,
         context: SequenceEmbeddingContext | None = None,
+        audio_prompt: AudioPrompt | None = None,
     ) -> FeaturizedSequence:
         """Teacher-forced forward pass: feature ``t`` predicts ``tokens[t+1]``.
 
@@ -292,12 +319,15 @@ class ChatterboxFeaturizer:
         the ``speaker_emb`` in ``context`` plus a speaker prompt taken from the
         first ``speech_cond_prompt_len`` (<=150) frames of the utterance's own audio.
         Resulting ``cond`` is a fixed length ``speech_cond_prompt_len`` (34) frames.
+
+        Pass ``audio_prompt`` to condition on another utterance instead; ``context``
+        is then unused, since the prompt carries its own speaker embedding.
         """
         if include_kv:
             raise NotImplementedError(
                 "Chatterbox teacher-forced KV export is not implemented yet"
             )
-        if context is None or "speaker_emb" not in context:
+        if audio_prompt is None and (context is None or "speaker_emb" not in context):
             raise ValueError(
                 "Chatterbox featurize needs the 'speaker_emb' embedding context "
                 "written by tokenize; re-run the tokenize stage if it is missing"
@@ -312,8 +342,13 @@ class ChatterboxFeaturizer:
         tokens = torch.as_tensor(sequence.tokens, dtype=torch.long)
         spans = {span.kind: span for span in sequence.spans}
         try:
-            text_start = spans[TokenSpanKind.BOS_TEXT].start
-            text_end = spans[TokenSpanKind.EOS_TEXT].end
+            # Turbo/Nano add no SOT/EOT, so TEXT is the whole span.
+            text_start = spans.get(
+                TokenSpanKind.BOS_TEXT, spans[TokenSpanKind.TEXT]
+            ).start
+            text_end = spans.get(
+                TokenSpanKind.EOS_TEXT, spans[TokenSpanKind.TEXT]
+            ).end
             speech_start = spans[TokenSpanKind.BOS_AUDIO].start
             audio = spans[TokenSpanKind.AUDIO]
             speech_end = spans[TokenSpanKind.EOS_AUDIO].end
@@ -323,34 +358,39 @@ class ChatterboxFeaturizer:
         text_tokens = tokens[text_start:text_end, -1].unsqueeze(0).to(device)
         speech_tokens = tokens[speech_start:speech_end, 0].unsqueeze(0).to(device)
 
-        speaker_prompt = tokens[
-            audio.start : min(audio.start + hp.speech_cond_prompt_len, audio.end), 0
-        ]
+        if audio_prompt is None:
+            speaker_prompt = tokens[
+                audio.start : min(audio.start + hp.speech_cond_prompt_len, audio.end), 0
+            ]
+            speaker_emb = torch.as_tensor(context["speaker_emb"], dtype=dtype)
+        else:
+            speaker_prompt = audio_prompt.prompt_tokens(hp)
+            speaker_emb = torch.as_tensor(audio_prompt.speaker_emb, dtype=dtype)
         cond = T3Cond(
-            speaker_emb=torch.as_tensor(context["speaker_emb"], dtype=dtype)
-            .view(1, -1)
-            .to(device),
+            speaker_emb=speaker_emb.view(1, -1).to(device),
             cond_prompt_speech_tokens=speaker_prompt.unsqueeze(0).to(device),
             emotion_adv=DEFAULT_EMOTION_ADV * torch.ones(1, 1, 1, dtype=dtype, device=device),
         )
 
         with torch.inference_mode():
             cond_emb = model.prepare_conditioning(cond)
-            text_emb = model.text_emb(text_tokens) + model.text_pos_emb(text_tokens)
-            # LearnedPositionEmbeddings numbers from 0 off the tensor it is
-            # handed, so the whole stream must be embedded at once.
-            speech_emb = model.speech_emb(speech_tokens) + model.speech_pos_emb(
-                speech_tokens
-            )
+            text_emb = model.text_emb(text_tokens)
+            speech_emb = model.speech_emb(speech_tokens)
+            # Turbo/Nano position internally via GPT-2 wpe. Where there are
+            # learned embeddings, LearnedPositionEmbeddings numbers from 0 off
+            # the tensor it is handed, so each stream is embedded at once.
+            if hp.input_pos_emb == "learned":
+                text_emb = text_emb + model.text_pos_emb(text_tokens)
+                speech_emb = speech_emb + model.speech_pos_emb(speech_tokens)
             embeds = torch.cat(
                 [cond_emb, text_emb.to(dtype), speech_emb.to(dtype)], dim=1
             )
             if embeds.shape[1] != sequence.unpadded_length:
                 raise ValueError(
-                    f"Built {embeds.shape[1]} input frames for a "
-                    f"{sequence.unpadded_length}-frame sequence; COND_PREFIX_LEN "
-                    f"({COND_PREFIX_LEN}) no longer matches the model's "
-                    f"conditioning width"
+                    f"Mismatch between embeddings length {embeds.shape[1]} "
+                    f" and tokenized input frames {sequence.unpadded_length}."
+                    "Embeddings lengths [context | text | speech]: "
+                    f"{cond_emb.shape[1]}, {text_emb.shape[1]}, {speech_emb.shape[1]}."
                 )
             # Feed the bucket padding too, for a fixed set of input widths. No
             # attention mask needed: the model is causal and padding is strictly
@@ -502,7 +542,10 @@ class ChatterboxTokenizer:
         layout = TokenizedSequenceLayout(
             num_codebooks=self.audio_codec.num_codebooks, text_channel=-1
         )
-        length = COND_PREFIX_LEN + n_text + n_speech
+        prefix_len = cond_prefix_len(
+            self.hp, num_audio_prompt_frames(self.hp, frames)
+        )
+        length = prefix_len + n_text + n_speech
         padded_length = bucket_length(length, self.bucket_frames)
         tokens = torch.zeros(padded_length, channels, dtype=torch.long)
         spans: list[TokenSequenceSpan] = []
@@ -516,11 +559,11 @@ class ChatterboxTokenizer:
                 )
             )
 
-        # [0, 34) conditioning prefix: reserved and never supervised, since these
-        # frames are projections of a vector and a scalar with no token id.
-        # Holding the space keeps grid positions equal to model positions, so
-        # featurize can slice with the usual [start-1, end-1) offset.
-        position = COND_PREFIX_LEN
+        # Conditioning prefix: reserved and never supervised, since these frames
+        # are projections of vectors with no token id. Holding the space keeps
+        # grid positions equal to model positions, so featurize can slice with
+        # the usual [start-1, end-1) offset.
+        position = prefix_len
         add_span(0, position, TokenSpanKind.PREFIX)
 
         tokens[position, -1] = self.hp.start_text_token

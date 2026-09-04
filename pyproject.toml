@@ -39,7 +39,9 @@ mlx_decode = [
 # Chatterbox AR + Flash tokenize. chatterbox-tts pins transformers==5.2.0 and
 # torch 2.6, so this is a third mutually-exclusive environment -- install it alone.
 dataprep-chatterbox = [
-    "chatterbox-tts==0.1.7",
+    # Past latest pypi release 0.1.7 for ChatterboxNano support 
+    # used by experiments/specdec_offline_acceptance
+    "chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2",
     "soundfile",
     "librosa",
     # dataprep.shards writes tars via webdataset.TarWriter, so `prepare` needs it
