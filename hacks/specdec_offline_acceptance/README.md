@@ -1,6 +1,7 @@
-# Bonus: Qwen3-TTS, 0.6B drafting 1.7B
+# Qwen3-TTS specdec acceptance, 0.6B drafting 1.7B (unmaintained)
 
-The same offline acceptance measurement (see [README](README.md) for the method) applied to a
+The same offline acceptance measurement (see the
+[Chatterbox writeup](../../experiments/specdec_offline_acceptance/README.md) for the method) applied to a
 multi-codebook model, where Chatterbox's single axis becomes two.
 
 [Qwen3-TTS-12Hz-0.6B-Base](https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-Base) drafting
@@ -36,7 +37,10 @@ The dataprep backend that produced them is not part of the current pipeline; the
 they exist.
 
 ```bash
-python experiments/specdec_offline_acceptance/qwen3.py --axis both --rows 10
+python hacks/specdec_offline_acceptance/qwen3.py --axis both --rows 10
 ```
 
 `--axis` selects `cb0`/`depth`/`both`, `--rows` sets how many dataset rows to pool.
+
+The sampling core is imported from `experiments/specdec_offline_acceptance/simulate_acceptance.py`,
+so this script depends on that experiment staying in place.

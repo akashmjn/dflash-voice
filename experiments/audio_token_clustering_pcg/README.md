@@ -1,26 +1,20 @@
-# Clustering audio tokens for coarse-grained speculative decoding
+# Clustering audio tokens
 
-Speculative decoding accepts a draft token only on an exact match against the target
-model's distribution. For audio that test is too strict: a speech codebook entry is a
-point in a continuous acoustic space, so neighbouring ids are often near-interchangeable
-and a draft gets rejected over a difference nobody can hear.
+Are audio tokens materially different from text tokens?
 
-[Principled Coarse-Graining (PCG)](https://arxiv.org/abs/2511.13732) verifies at the
-level of *groups* of acoustically similar tokens rather than individual ids. Groups are
-read straight off the target model's embedding table — one seeded per token,
-`G(t) = {t' : cos(Emb(t), Emb(t')) > θ}` — so nothing is trained, and the single
-threshold `θ` trades output fidelity for acceptance.
+[Principled Coarse-Graining (PCG) (Apple, 2026)](https://arxiv.org/abs/2511.13732) showed that unlike text, audio tokens are interchangeable with minimal downstream impact. This means that in a speculative decoding setup, tokens are rejected over a difference that is perceptually inaudible.
 
-We measure how `θ` controls group size on [Chatterbox](https://huggingface.co/ResembleAI/chatterbox),
-a 0.5B single-codebook TTS model, to find the usable range before building a full
-speculative decoding loop. Too small and PCG reduces to ordinary speculative decoding;
-too large and it accepts drafts that no longer sound like the target.
+Here we implement the clustering algorithm and the token-swapping ablation on [Chatterbox](https://huggingface.co/ResembleAI/chatterbox) - a 0.5B TTS model with a single ~6.5k size FSQ token vocab.
 
-## Cluster size vs θ
+### Method
 
-Groups built from the `speech_emb` table of Chatterbox AR (vocab 6561, dim 1024). Bold
-marks θ∈[0.38, 0.45], the band the paper reports as optimal for a 65k
-[X-codec2](https://huggingface.co/HKUSTAudio/xcodec2) vocabulary.
+Acoustic similarity groups (ASG) are created by clustering the target model's embedding table — `G(t) = {t' : cos(Emb(t), Emb(t')) > θ}`. At decoding, target/draft verification is modified so that exactness of the sampled token distribution is guaranteed at the level of groups (ASG) rather than individual tokens. See `experiments/specdec_offline_acceptance` for more.
+
+The single threshold `θ` trades output fidelity for acceptance - in the limit `θ=1` each group consists of each vocab token, reducing to ordinary speculative decoding.
+
+### Cluster size vs θ
+
+Groups are built from the `speech_emb` table of Chatterbox AR [vocab 6561 (excluding eos), dim 1024]. Bold marks θ∈[0.45], the band the paper reports as optimal for a 65k [X-codec2](https://huggingface.co/HKUSTAudio/xcodec2) vocabulary.
 
 
 | θ        | mean size | singleton frac | median | max     | % of vocab |
@@ -30,49 +24,69 @@ marks θ∈[0.38, 0.45], the band the paper reports as optimal for a 65k
 | 0.60     | 4.1       | 0.269          | 4      | 31      | 0.06%      |
 | 0.50     | 12.9      | 0.032          | 12     | 75      | 0.20%      |
 | **0.45** | **23.6**  | **0.009**      | **22** | **111** | **0.36%**  |
-| **0.40** | **43.5**  | **0.003**      | **42** | **154** | **0.66%**  |
+| 0.40     | 43.5      | 0.003          | 42     | 154     | 0.66       |
 | 0.30     | 148.0     | 0.001          | 145    | 320     | 2.26%      |
 | 0.20     | 504.5     | 0.000          | 513    | 966     | 7.69%      |
 
 
-**Singleton frac** is the share of tokens grouped only with themselves — where PCG
-provably reduces to ordinary speculative decoding. **% of vocab** is mean group size over
-the 6561-token vocabulary, for comparison against other codecs. Full sweep in
-`results/chatterbox-ar.json`.
+Full sweeps are saved to `results/summary/chatterbox-ar.json`.
 
-**θ∈[0.4, 0.5] is the usable band.** At θ=0.40 a group holds 43.5 tokens, 0.66% of the  
-vocabulary, with almost no singletons. Matching the paper's reported mean of ~140 tokens  
-by vocabulary *fraction* lands near θ≈0.47, by absolute count near θ≈0.31. The curve turns  
-sharply above θ=0.6 — 0.7→0.6→0.5 gives 1.3→4.1→12.9 — and above θ≈0.75 every group is a  
-singleton, so the method costs construction and indexing to do nothing.
-
-## One group table covers both Chatterbox variants
-
-Speculative decoding needs draft and target to share a token vocabulary, and the groups
-must describe both. We compared Chatterbox AR against
-[Chatterbox Flash](https://huggingface.co/ResembleAI/chatterbox-flash), its faster finetuned sibling. Vocab embeddings have indeed been finetuned   
-but it preserved the geometry: Gram cosine 0.9979, and group-size curves within 1% at every θ.
-
-> [!NOTE] Groups are built over ids 0–6560, the trained speech codes. Ids 6561/6562 are   
+> NOTE: Groups are built over ids 0–6560, the trained speech codes. Ids 6561/6562 are  
 > BOS/EOS and 6563–8193 appear to be untrained vocab padding.
 
+## Audio Token Swapping
+
+We reproduce the paper's token-swapping ablation here, which shows that at θ=0.60, the swapped audio **sounds indistinguishable from the unswapped baseline despite 76.9% of tokens changing.**
 
 
-## What this does not measure
+| θ        | mean group size | singleton frac | max group size | tokens swapped |
+| -------- | --------------- | -------------- | -------------- | -------------- |
+| **0.60** | **4.1**         | **0.269**      | **31**         | **76.9%**      |
+| 0.45     | 23.6            | 0.009          | 111            | 94.9%          |
+| 0.30     | 148.0           | 0.001          | 320            | 98.5%          |
 
-Group size bounds what PCG can do; it does not show that it works. The open question is
-**acceptance rate** — how often the coarse-grained test accepts a draft — which needs
-draft and target logits over real frames, and then speech quality at the chosen θ to
-confirm the relaxed distribution still sounds right.
+
+An utterance is generated with the Chatterbox AR model, and every token belonging to a group of size > 1 is replaced by a uniform draw from its group. Replacement stats above are reported on six utterances of 1,068 frames total.
+
+The same audio prompt (speaker embedding, context) is used when detokenizing back to audio with the S3Gen the swap is the only thing separating the two renders.
 
 ## Reproduce
 
-Needs `numpy` and `safetensors` only; checkpoints download to the HF cache on first run.
-From the repo root:
+Cluster generation needs `numpy` and `safetensors`; checkpoints download to the HF cache on first run. From the repo root:
 
 ```bash
-python experiments/audio_token_clustering_pcg/pcg_chatterbox.py
+uv pip install -e ".[mlx_decode]"
+python experiments/audio_token_clustering_pcg/cluster.py --dump-thetas 0.6,0.45,0.3
 ```
 
-Per-model group sizes land in `results/`. Flags: `--models` selects
-`cbox-ar`/`cbox-flash`, `--thetas` sets the sweep points.
+The script writes the θ sweep to `results/summary/MODEL.json`, and ASG token clusters to
+`results/token_clusters/MODEL/thetaTT.json` — one file per θ, since a mapping runs to
+megabytes and nothing needs more than one threshold at a time.
+
+The swapping ablation runs as below:
+
+```bash
+python experiments/audio_token_clustering_pcg/token_swap.py --thetas 0.6,0.45,0.3
+```
+
+Each utterance gets its own directory under `results/token_swap/`, holding both audio (wav)
+and token sequences (npy); the tree is gitignored. `demo/` carries prompt_004's unswapped
+render next to its θ=0.60 swap, as a checked-in before/after pair.
+
+## Reusing the saved clusters
+
+(see `experiments/specdec_offline_acceptance/coarse_acceptance.py` for usage)
+
+Each θ gets its own file, `results/token_clusters/MODEL/thetaTT.json`. There is one group per token in the 6561-token speech vocabulary, stored as a sparse adjacency list:
+
+```json
+{"model": "cbox-ar", "theta": 0.45, "vocab": 6561,
+ "groups": [[0, 3, 6, 9, 27, ...], ...], "owner_counts": [...]}
+```
+
+`groups[k]` is `G(k)`, listing the tokens acoustically similar to `k` (including `k`
+itself, since cosine is reflexive). In the θ=0.45 dump `groups[0]` holds 20 ids and mean
+group size is 23.6, over 154,915 members total.
+
+Groups overlap, so a token belongs to several. `owner_counts[t]` is how many groups hold
+token `t`. It is a count *down* the columns, so unlike the groups themselves it cannot be read off a single row. 

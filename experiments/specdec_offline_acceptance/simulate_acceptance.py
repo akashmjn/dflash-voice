@@ -13,9 +13,12 @@ for what this does and does not measure.
 ```bash
 python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --block-size 4
 python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --draft turbo
+python experiments/specdec_offline_acceptance/simulate_acceptance.py --rows 10 --theta 0.45
 ```
 
-``qwen3.py`` reuses the sampling core here for a multi-codebook model.
+``--theta`` verifies over PCG acoustic similarity groups instead of single tokens
+(see ``coarse_acceptance.py``). ``qwen3.py`` reuses the sampling core here for a
+multi-codebook model.
 """
 
 from __future__ import annotations
@@ -29,14 +32,17 @@ import torch
 import typer
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+EXPERIMENT_DIR = Path(__file__).resolve().parent
+for _path in (REPO_ROOT, EXPERIMENT_DIR):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
 
 from dataprep.types import (  # noqa: E402
     FeaturizedSequence,
     TokenizedSequence,
     TokenSpanKind,
 )
+from coarse_acceptance import CoarseGroups, coarse_accept  # noqa: E402
 
 #: Draft block sizes reported for tau(gamma).
 GAMMAS = (1, 2, 4, 8)
@@ -63,6 +69,13 @@ FEATURIZED_STAGE = "featurized"
 #: The Flash release decodes 16 tokens a block, too wide to accept here (alpha
 #: falls off with block size); 4 is the middle of the 1-8 range this sweeps.
 DEFAULT_BLOCK_SIZE = 4
+
+#: Results tree of the audio_token_clustering_pcg experiment, holding one ASG
+#: cluster dump per theta under token_clusters/MODEL/.
+DEFAULT_CLUSTER_RESULTS = (
+    REPO_ROOT / "experiments" / "audio_token_clustering_pcg" / "results"
+)
+DEFAULT_CLUSTER_MODEL = "chatterbox-ar"
 
 #: HF repo per draft, for the results JSON.
 DRAFT_MODELS = {
@@ -138,6 +151,7 @@ def speculative_step(
     return token, accepted
 
 
+
 def mean_nll(logits: torch.Tensor, targets: torch.Tensor,
              mask: torch.Tensor | None = None) -> float:
     """Mean teacher-forced NLL in nats/frame over ``(frames, vocab)`` logits."""
@@ -164,16 +178,21 @@ def count_accepted(
     rng: torch.Generator,
     mask: torch.Tensor | None = None,
     method: str = "inverse-cdf",
+    groups: CoarseGroups | None = None,
 ) -> tuple[int, int]:
     """Accepted count and frame count for one aligned ``(frames, vocab)`` sequence.
 
     Trims to the shorter of the two so a ragged tail cannot misalign the pair.
+    ``groups`` switches verification from token-level to PCG's group level.
     """
     num_frames = min(draft_logits.shape[0], target_logits.shape[0])
     if num_frames == 0:
         return 0, 0
     draft = masked_softmax(draft_logits[:num_frames], mask)
     target = masked_softmax(target_logits[:num_frames], mask)
+    if groups is not None:
+        token = sample_tokens(draft, rng, method)
+        return int(coarse_accept(token, draft, target, groups, rng).sum()), num_frames
     return int(speculative_step(draft, target, rng, method)[1].sum()), num_frames
 
 
@@ -352,6 +371,7 @@ def measure(
     dataset: str,
     flash_features: str | None,
     rng: torch.Generator,
+    groups: CoarseGroups | None = None,
 ) -> dict:
     """Acceptance over the backbone axis, plus both sides' NLL on the same frames."""
     mask = live_token_mask()
@@ -378,7 +398,7 @@ def measure(
         draft = flatten(draft_rows)
         target = flatten(target_rows)
         targets = torch.cat([t for s in sequences for t in audio_targets(s)])
-        row_hits, row_frames = count_accepted(draft, target, rng, mask)
+        row_hits, row_frames = count_accepted(draft, target, rng, mask, groups=groups)
 
         draft_nll += mean_nll(draft[:row_frames], targets[:row_frames], mask) * row_frames
         target_nll += mean_nll(target[:row_frames], targets[:row_frames], mask) * row_frames
@@ -392,6 +412,8 @@ def measure(
         live_vocab=int(mask.sum()),
         draft_nll=round(draft_nll / total_frames, 4),
         target_nll=round(target_nll / total_frames, 4),
+        **({"coarse": {"theta": groups.theta, "mean_group_size": round(groups.mean_size, 2)}}
+           if groups is not None else {}),
     )
 
 
@@ -410,6 +432,15 @@ def main(
     ),
     dataset: str = typer.Option("expresso", help="Dataset slug for artifact paths."),
     seed: int = typer.Option(0, help="Sampling RNG seed."),
+    theta: Optional[float] = typer.Option(
+        None, help="Verify over PCG acoustic similarity groups at this theta."
+    ),
+    cluster_results: Path = typer.Option(
+        DEFAULT_CLUSTER_RESULTS, help="Clustering results tree read by --theta."
+    ),
+    cluster_model: str = typer.Option(
+        DEFAULT_CLUSTER_MODEL, help="Which model's cluster dumps --theta reads."
+    ),
     out: Optional[Path] = typer.Option(
         None, help="Results JSON (default: results/chatterbox_{bN,DRAFT}.json)."
     ),
@@ -426,10 +457,20 @@ def main(
     flash_features = f"features_b{block_size}.pt" if draft == "flash" else None
     tag = f"b{block_size}" if draft == "flash" else draft
     draft_artifact = draft_artifact or f"chatterbox-{draft}"
+
+    groups = None
+    if theta is not None:
+        groups = CoarseGroups.load(
+            cluster_results, cluster_model, theta, HEAD_VOCAB_SIZE
+        )
+        tag = f"{tag}_theta{groups.theta:.2f}"
     # Default the output per draft, so a sweep cannot overwrite its own runs.
     out = out or Path(__file__).with_name("results") / f"chatterbox_{tag}.json"
 
     print(f"Chatterbox {draft.capitalize()} drafting Chatterbox AR:")
+    if groups is not None:
+        print(f"  PCG groups: theta={groups.theta:.2f}, "
+              f"mean |G|={groups.mean_size:.1f}")
     results = {
         "draft_model": DRAFT_MODELS[draft],
         "target_model": "ResembleAI/chatterbox",
@@ -441,7 +482,7 @@ def main(
         **({"block_size": block_size} if draft == "flash" else {}),
         "cb0": measure(
             rows, target_artifact, draft_artifact, dataset, flash_features,
-            torch.Generator().manual_seed(seed),
+            torch.Generator().manual_seed(seed), groups,
         ),
     }
 

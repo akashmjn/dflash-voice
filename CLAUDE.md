@@ -34,7 +34,9 @@ dflash-voice/
 ├── demo/                  two-speaker podcast demo (mlx-audio APIs directly)
 ├── train/                 TTS finetuning — dev branch only, empty on main
 ├── hacks/                 unmaintained experiments, not packaged
-│   └── rvq_decoder_train/   Miso depth-decoder experiment (see its README)
+│   ├── rvq_decoder_train/          Miso depth-decoder experiment (see its README)
+│   ├── audio_token_clustering_pcg/ Qwen3 half of the clustering experiment
+│   └── specdec_offline_acceptance/ Qwen3 half of the acceptance experiment
 ├── agent-workspace/       gitignored scratch space for agents (see Agent workflow)
 ├── data/                  gitignored dataprep input/output artifacts (see below)
 └── tmp/                   gitignored scratch outputs
@@ -138,6 +140,8 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 **train/** (dev branch only) — the training track, aimed at Chatterbox-Flash TTS finetuning. Currently an empty package. Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
 
 **hacks/** — unmaintained experiments, deliberately not a package and not covered by `[tool.setuptools.packages.find]`. `rvq_decoder_train/` is the earlier Miso depth-decoder experiment (`MisoRVQDepthDecoder` + converter + NLL eval + a wall-clock trainer), including its `FramePackingIterableDataset` (frame-level geometry, not sequences). Modules import each other as siblings, so run it from its own directory rather than as `python -m` — see `hacks/rvq_decoder_train/README.md`.
+
+`audio_token_clustering_pcg/` and `specdec_offline_acceptance/` hold the Qwen3-TTS halves of the two Chatterbox experiments, parked here when that workstream moved to Chatterbox. Unlike `rvq_decoder_train/` these are not self-contained: each imports the shared core from its `experiments/` counterpart (`cluster.py`, `simulate_acceptance.py`) via a `sys.path` insert, so run them from the repo root and keep those paths in place.
 
 ## Agent workflow
 

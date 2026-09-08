@@ -74,7 +74,7 @@ MODELS = {
         "model_id": "mlx-community/Chatterbox-TTS-8bit",
         # The checkpoint carries no conds.safetensors, so a voice must be
         # supplied. Encoded once at load, outside the timed region.
-        "load_kwargs": {"ref_audio": str(WARMUP_DIR / "hello-1.wav")},
+        "load_kwargs": {"ref_audio": str(WARMUP_DIR / "jensen-30sec.wav")},
         "generate": {
             "temperature": 0.8,
             "min_p": 0.05,
