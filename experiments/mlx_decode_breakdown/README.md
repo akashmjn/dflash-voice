@@ -4,7 +4,7 @@ We measure per-codec-frame decode times of OSS TTS models ranging from 0.5B (Cha
 
 We see that overhead from repeated forward passes of 140-400M param audio decoders takes up more than 50% of inference time, inspite of heavier semantic backbones (0.6B - 8B).
 
-![MLX decode breakdown chart](./assets/mlx_decode_breakdown.png)
+![MLX decode breakdown chart](./assets/mlx-decode-breakdown.png)
 
 
 | Model            | Frame rate | Wall RTF | Audio decoder % | Total ms | Semantic backbone (ms) | Audio decoder (ms) | Decoder iterations | ms / iterations | Frames/s |

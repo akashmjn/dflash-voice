@@ -2,7 +2,7 @@
 
 Local inference of popular open-source TTS/omni models is bottlenecked (> 50%) by repeated forward passes of smaller models to generate audio tokens vs larger LLM-based backbones that handle semantics/prosody.
 
-![MLX decode breakdown chart](./experiments/mlx_decode_breakdown/assets/mlx_decode_breakdown.png)
+![MLX decode breakdown chart](./experiments/mlx_decode_breakdown/assets/mlx-decode-breakdown.png)
 
 This project contains ongoing explorations on two directions to speed this up:
 1. Discrete: Speculative decoding over audio tokens on a single-codebook TTS model [Chatterbox](https://github.com/resemble-ai/chatterbox). We look at acceptance rates for various off-the-shelf target/draft pairings, and explore a principled way to relax acceptance criteria to handle nuances of audio tokens.
