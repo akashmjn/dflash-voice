@@ -1,13 +1,15 @@
-# dflash-voice: Exploring specdec and block-diffusion for TTS
+# dflash-voice: Exploring efficient audio generation 
 
-Blockwise diffusion language models are at a flash point - with [DFlash](https://www.lmsys.org/blog/2026-06-15-next-generation-speculative-decoding-dflash-v2/#dflash-parallel-drafting-with-kv-injection) seeing impressive 6+ token speculative decoding acceptance lengths  on the latest LLMs (DeepseekV4, Qwen3.5, Inkling). Parallel canvas-style generation makes a perfect fit for fast, high-interactivity models (e.g. voice, function calling etc).
+Local inference of popular open-source TTS/omni models is bottlenecked (> 50%) by repeated forward passes of smaller models to generate audio tokens vs larger LLM-based backbones that handle semantics/prosody.
 
-Like with text, tokenization for audio is tricky but critical, as leading OSS TTS models need to generate upwards of 200+ tokens/s. Tokenizer design i.e. RVQ/FSQ and single-codebook/multi-layer-codebook has a large impact on applicability of specdec and block-diffusion techniques for parallel audio generation.
+![MLX decode breakdown chart](./experiments/mlx_decode_breakdown/assets/mlx_decode_breakdown.png)
 
-This repo contains some early explorations/experiments:
-1. [Motivation](./experiments/expresso_nll_entropy/): We pick a few TTS models (Qwen3, Fish S2, CSM/Miso) and find they compress audio down to 1.4-2.2 kbit/s. Information density is unevenly distributed, motivating parallel generation of low-information tokens to increase model throughput.
-2. [MLX inference breakdown](./experiments/mlx_decode_breakdown/): We see that repeated forward passes of 100-300M param RVQ audio decoders take up more than 50% of inference time, inspite of heavier LLM backbones (1.7B - 8B).
+This project contains ongoing explorations on two directions to speed this up:
+1. Discrete: Speculative decoding over audio tokens on a single-codebook TTS model [Chatterbox](https://github.com/resemble-ai/chatterbox). We look at acceptance rates for various off-the-shelf target/draft pairings, and explore a principled way to relax acceptance criteria to handle nuances of audio tokens.
+2. Continuous: [MeanFlows](https://arxiv.org/abs/2505.13447) distillation of velocity fields from the [Voxtral TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) audio token flow decoder, reducing NFEs (number of function evaluations) from 14 to 2 for upto 2x faster local inference (ongoing).
 
-Repo also contains code to reproduce above analyses - you will need an Apple Silicon laptop with MLX support.
+The exploration helps understand the critical role of audio tokenization in both. Only single-codebook FSQ models are straightforward to implement speculative decoding over, while MeanFlows only applies to models with flow-based decoders generating multiple FSQ codes. Models with multi-layer RVQ tokenizers can't be used with either. Ultimately, we see why continuous-based approaches are better positioned for local efficiency - as seen in [Pocket TTS](https://arxiv.org/abs/2509.06926).
+
+To reproduce the benchmark above, you will need an Apple Silicon laptop with MLX support. The `dev` branch contains work in progress on dataprep, finetuning models and other experiments under `experiments/`.
 
 More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!

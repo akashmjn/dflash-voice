@@ -6,12 +6,15 @@ reported per step: backbone (semantic token) and depth decoder (remaining
 codebooks) separately, plus codec decode.
 
 ```bash
-python mlx_decode/bench.py --model miso --save-audio
+python mlx_decode/bench.py bench --model miso --save-audio
+python mlx_decode/bench.py bench --model all      # or a comma-separated list
+python mlx_decode/bench.py summarize              # table from saved metrics.json
 ```
 """
 
 from __future__ import annotations
 
+import builtins
 import importlib
 import json
 import re
@@ -26,8 +29,12 @@ from tqdm import tqdm
 from mlx_decode import GenerationProfile
 
 
+WARMUP_DIR = Path(__file__).resolve().parent / "warmup"
+
 MODELS = {
     "qwen3": {
+        "frame_rate_hz": 12.5,
+        "decoder_iterations": 15,
         "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
         "generate": {
             "voice": "Ryan",
@@ -39,6 +46,8 @@ MODELS = {
         },
     },
     "fish": {
+        "frame_rate_hz": 21.0,
+        "decoder_iterations": 9,
         "model_id": "mlx-community/fish-audio-s2-pro-8bit",
         "generate": {
             "temperature": 0.7,
@@ -47,7 +56,37 @@ MODELS = {
             "max_tokens": 1024,
         },
     },
+    "voxtral": {
+        "frame_rate_hz": 12.5,
+        "decoder_iterations": 7,
+        "model_id": "mlx-community/Voxtral-4B-TTS-2603-mlx-6bit",
+        # No sampling knobs: argmax semantic code, flow-matched acoustic codes.
+        "generate": {
+            "voice": "casual_male",
+            "max_tokens": 1024,
+        },
+    },
+    # Single-codebook AR: backbone generations FSQ codes, no separate audio token decoder.
+    "cbox-ar": {
+        "frame_rate_hz": 25.0,
+        "decoder_iterations": None,
+        "module": "cbox_ar",
+        "model_id": "mlx-community/Chatterbox-TTS-8bit",
+        # The checkpoint carries no conds.safetensors, so a voice must be
+        # supplied. Encoded once at load, outside the timed region.
+        "load_kwargs": {"ref_audio": str(WARMUP_DIR / "jensen-30sec.wav")},
+        "generate": {
+            "temperature": 0.8,
+            "min_p": 0.05,
+            "top_p": 1.0,
+            "repetition_penalty": 1.2,
+            "cfg_weight": 0.5,
+            "max_tokens": 1000,
+        },
+    },
     "miso": {
+        "frame_rate_hz": 12.5,
+        "decoder_iterations": 31,
         "model_id": "mlx-community/MisoLabs-MisoTTS-8bit",
         "generate": {
             "temperature": 0.9,
@@ -82,7 +121,6 @@ DEFAULT_OUTPUT_DIR = Path("mlx_decode/output")
 # Two-speaker priming turns for miso, at its native 24 kHz.
 # Miso being a base model appears to be unstable when generating from empty context 
 # some preconditioning makes better generations -- at the cost of comparable timings.
-WARMUP_DIR = Path(__file__).resolve().parent / "warmup"
 MISO_CONTEXT = [
     (0, "Okay we're recording! Let's get into it.", str(WARMUP_DIR / "warmup_spk0.wav")),
     (1, "Sounds good, ready when you are!", str(WARMUP_DIR / "warmup_spk1.wav")),
@@ -155,6 +193,56 @@ def _timing_metrics(s: dict[str, float]) -> dict[str, Any]:
     }
 
 
+SUMMARY_COLUMNS = [
+    ("Model", 16),
+    ("Frame rate", 10),
+    ("Wall RTF", 8),
+    ("Audio decoder %", 15),
+    ("Total ms", 8),
+    ("Semantic backbone (ms)", 22),
+    ("Audio decoder (ms)", 18),
+    ("Decoder iterations", 18),
+    ("ms / iterations", 15),
+    ("Frames/s", 8),
+]
+
+
+def _summary_row(
+    *, label: str, stats: dict[str, float], mean_rtf: float, spec: dict[str, Any]
+) -> list[str]:
+    """One markdown row in the shape of experiments/mlx_decode_breakdown."""
+    hz, iters = spec.get("frame_rate_hz"), spec.get("decoder_iterations")
+    total = stats["gen_mean"]
+    return [
+        label,
+        f"{hz:g} Hz" if hz else "-",
+        f"{mean_rtf:.2f}",
+        f"{100 * stats['depth_mean'] / total:.0f}%" if total else "-",
+        f"{total:.1f}",
+        f"{stats['backbone_mean']:.1f}",
+        f"{stats['depth_mean']:.1f}",
+        str(iters) if iters else "-",
+        f"{stats['depth_mean'] / iters:.2f}" if iters else "-",
+        f"{stats['rate']:.1f}",
+    ]
+
+
+def _print_summary_table(rows: list[list[str]]) -> None:
+    headers = [h for h, _ in SUMMARY_COLUMNS]
+    widths = [
+        max(w, *(len(r[i]) for r in rows)) for i, (_, w) in enumerate(SUMMARY_COLUMNS)
+    ]
+
+    def line(cells: list[str]) -> str:
+        return "| " + " | ".join(v.ljust(w) for v, w in zip(cells, widths)) + " |"
+
+    # builtins.print, not rich's -- rich soft-wraps the row at the terminal width.
+    builtins.print(line(headers))
+    builtins.print("|" + "|".join("-" * (w + 2) for w in widths) + "|")
+    for row in rows:
+        builtins.print(line(row))
+
+
 def _run(
     *,
     name: str,
@@ -164,9 +252,12 @@ def _run(
     out_dir: Path,
     save_audio: bool,
     warmup: bool,
-) -> None:
+    spec: dict[str, Any],
+) -> list[str]:
     print(f"Loading {model_id}")
-    model = importlib.import_module(f"mlx_decode.{name}").load_model(model_id)
+    module = spec.get("module", name)
+    load = importlib.import_module(f"mlx_decode.{module}").load_model
+    model = load(model_id, **spec.get("load_kwargs", {}))
     if warmup:
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 
@@ -232,6 +323,9 @@ def _run(
         )
     )
     print(f"\nSaved metrics: {metrics_path}")
+    return _summary_row(
+        label=model_id.rsplit("/", 1)[-1], stats=stats, mean_rtf=mean_rtf, spec=spec
+    )
 
 
 app = typer.Typer(
@@ -240,13 +334,28 @@ app = typer.Typer(
 )
 
 
+def _parse_models(value: str) -> list[str]:
+    """Comma-separated model names, or "all"."""
+    if value.strip() == "all":
+        return list(MODELS)
+    names = [n.strip() for n in value.split(",") if n.strip()]
+    if not names:
+        raise typer.BadParameter("No model names given.")
+    unknown = [n for n in names if n not in MODELS]
+    if unknown:
+        raise typer.BadParameter(
+            f"Unknown model(s) {unknown}; expected 'all' or any of {tuple(MODELS)}"
+        )
+    return names
+
+
 @app.command()
 def bench(
     model: str = typer.Option(
-        "qwen3", help=f"Model to benchmark. One of {tuple(MODELS)}."
+        "qwen3", help=f"Comma-separated model names, or 'all'. One of {tuple(MODELS)}."
     ),
     model_id: Optional[str] = typer.Option(
-        None, help="Checkpoint id (default: the model's 8-bit mlx-community build)."
+        None, help="Checkpoint id (default: the model's mlx-community build)."
     ),
     max_samples: Optional[int] = typer.Option(
         None, "--max-samples", "-n", help="Benchmark the first N prompts (default: all)."
@@ -265,29 +374,76 @@ def bench(
         DEFAULT_OUTPUT_DIR, help="Root for saved audio and metrics."
     ),
 ) -> None:
-    """Benchmark one model over the built-in prompts (or --prompts-file).
+    """Benchmark one or more models over the built-in prompts (or --prompts-file).
 
     Voice, style and sampling settings are not flags -- edit ``MODELS`` above so
     a run is reproducible from the model name alone.
     """
-    if model not in MODELS:
-        raise typer.BadParameter(f"Unknown model {model!r}; expected one of {tuple(MODELS)}")
-    if context and model != "miso":
-        raise typer.BadParameter(f"--context is miso-only, not supported for {model!r}")
+    names = _parse_models(model)
+    if context and names != ["miso"]:
+        raise typer.BadParameter(f"--context is miso-only, not supported for {names}")
+    if model_id and len(names) > 1:
+        raise typer.BadParameter("--model-id names a single checkpoint; benchmark one model.")
 
-    model_id = model_id or MODELS[model]["model_id"]
-    gen_kwargs = dict(MODELS[model]["generate"])
-    if context:
-        gen_kwargs["context"] = MISO_CONTEXT
-    _run(
-        name=model,
-        model_id=model_id,
-        gen_kwargs=gen_kwargs,
-        prompts=_load_prompts(prompts_file)[:max_samples],
-        out_dir=_output_dir(output_dir, model, model_id),
-        save_audio=save_audio,
-        warmup=warmup,
-    )
+    prompts = _load_prompts(prompts_file)[:max_samples]
+    rows = []
+    for name in names:
+        resolved = model_id or MODELS[name]["model_id"]
+        gen_kwargs = dict(MODELS[name]["generate"])
+        if context:
+            gen_kwargs["context"] = MISO_CONTEXT
+        rows.append(
+            _run(
+                name=name,
+                model_id=resolved,
+                gen_kwargs=gen_kwargs,
+                prompts=prompts,
+                out_dir=_output_dir(output_dir, name, resolved),
+                save_audio=save_audio,
+                warmup=warmup,
+                spec=MODELS[name],
+            )
+        )
+    print()
+    _print_summary_table(rows)
+
+
+@app.command()
+def summarize(
+    model: str = typer.Option(
+        "all", help=f"Comma-separated model names, or 'all'. One of {tuple(MODELS)}."
+    ),
+    output_dir: Path = typer.Option(
+        DEFAULT_OUTPUT_DIR, help="Root the metrics were written to."
+    ),
+) -> None:
+    """Print the summary table from metrics.json files an earlier run saved.
+
+    Every checkpoint benchmarked under a model's directory gets a row, so the
+    per-size variants (e.g. both Qwen3 builds) show up side by side.
+    """
+    rows = []
+    for name in _parse_models(model):
+        for path in sorted((output_dir / name).glob("*/metrics.json")):
+            data = json.loads(path.read_text())
+            agg = data["aggregate"]
+            gen = agg["generate_ms"]
+            rows.append(
+                _summary_row(
+                    label=path.parent.name,
+                    stats={
+                        "gen_mean": gen["per_step"],
+                        "backbone_mean": gen["backbone_semantic_per_step"],
+                        "depth_mean": gen["depth_audio_per_step"],
+                        "rate": gen["steps_per_s"],
+                    },
+                    mean_rtf=agg["mean_rtf"],
+                    spec=MODELS[name],
+                )
+            )
+    if not rows:
+        raise typer.BadParameter(f"No metrics.json found under {output_dir}; run bench first.")
+    _print_summary_table(rows)
 
 
 if __name__ == "__main__":
