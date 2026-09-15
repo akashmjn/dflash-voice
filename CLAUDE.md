@@ -31,9 +31,9 @@ dflash-voice/
 ├── experiments/           analysis writeups, each with its own README
 │   ├── expresso_nll_entropy/    NLL/entropy analysis (marimo notebooks)
 │   └── mlx_decode_breakdown/    decode-time breakdown writeup
-├── demo/                  two-speaker podcast demo (mlx-audio APIs directly)
 ├── train/                 TTS finetuning — dev branch only, empty on main
 ├── hacks/                 unmaintained experiments, not packaged
+│   ├── podcast_demo/               two-speaker podcast render (mlx-audio APIs)
 │   ├── rvq_decoder_train/          Miso depth-decoder experiment (see its README)
 │   ├── audio_token_clustering_pcg/ Qwen3 half of the clustering experiment
 │   └── specdec_offline_acceptance/ Qwen3 half of the acceptance experiment
@@ -42,7 +42,7 @@ dflash-voice/
 └── tmp/                   gitignored scratch outputs
 ```
 
-Data flows left to right: `dataprep/` (raw → tokenized → featurized, under `data/`) feeds `experiments/` and `train/`; `mlx_decode/` is a separate inference/benchmarking track that `demo/` and `experiments/mlx_decode_breakdown/` build on.
+Data flows left to right: `dataprep/` (raw → tokenized → featurized, under `data/`) feeds `experiments/` and `train/`; `mlx_decode/` is a separate inference/benchmarking track that `experiments/mlx_decode_breakdown/` builds on.
 
 ### data/ layout
 
@@ -111,8 +111,8 @@ pytest -v -m expensive dataprep/tests/test_miso_entropy.py
 # note: the expensive miso tests auto-skip on Apple silicon (MPS conv1d output
 # cap on Mimi's 30s encode chunk); they need a CUDA/CPU box to actually run
 
-# demo: two-speaker podcast render
-python demo/demo_tts_podcast.py render --model miso --max-segments 6
+# demo: two-speaker podcast render (needs the mlx_decode extra)
+python hacks/podcast_demo/demo_tts_podcast.py render --model miso --max-segments 6
 
 # experiment repro, from experiments/expresso_nll_entropy/
 python model_metrics.py compute --model miso
@@ -135,11 +135,9 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 
 **experiments/** — self-contained writeups, each with its own README, depending on dataprep output under `data/`. See repo README for a summary of the investigations.
 
-**demo/** — `demo_tts_podcast.py` uses mlx-audio's native APIs directly (not `mlx_decode`). Only `miso` supports cross-turn context; `--model fish` is not wired up (no `Segment`/context equivalent yet).
-
 **train/** (dev branch only) — the training track, aimed at Chatterbox-Flash TTS finetuning. Currently an empty package. Removed from `main` deliberately (`reorg: train on dev only`); check `git log --oneline main..dev` before assuming it's present locally.
 
-**hacks/** — unmaintained experiments, deliberately not a package and not covered by `[tool.setuptools.packages.find]`. `rvq_decoder_train/` is the earlier Miso depth-decoder experiment (`MisoRVQDepthDecoder` + converter + NLL eval + a wall-clock trainer), including its `FramePackingIterableDataset` (frame-level geometry, not sequences). Modules import each other as siblings, so run it from its own directory rather than as `python -m` — see `hacks/rvq_decoder_train/README.md`.
+**hacks/** — unmaintained experiments, deliberately not a package and not covered by `[tool.setuptools.packages.find]`. `podcast_demo/` is self-contained. `rvq_decoder_train/` an the earlier Miso depth-decoder experiment.
 
 `audio_token_clustering_pcg/` and `specdec_offline_acceptance/` hold the Qwen3-TTS halves of the two Chatterbox experiments, parked here when that workstream moved to Chatterbox. Unlike `rvq_decoder_train/` these are not self-contained: each imports the shared core from its `experiments/` counterpart (`cluster.py`, `simulate_acceptance.py`) via a `sys.path` insert, so run them from the repo root and keep those paths in place.
 
@@ -157,5 +155,5 @@ marimo edit experiments/expresso_nll_entropy/metrics_explore.py
 
 ## Notes
 
-- `data/`, `tmp/`, `agent-workspace/`, `demo/output/` are gitignored — artifacts there won't show up in `git status`.
+- `data/`, `tmp/`, `agent-workspace/`, `hacks/podcast_demo/output/` are gitignored — artifacts there won't show up in `git status`.
 - Modal (`MODAL_TOK_KEY`/`MODAL_TOK_SECRET` in `.env`) is used for remote execution — see `agent-workspace/modal_hello.py`.

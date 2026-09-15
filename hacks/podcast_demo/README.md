@@ -4,10 +4,10 @@ Renders a ~1min scripted two-speaker conversation with MLX TTS, using mlx-audio'
 
 ```bash
 uv pip install -e ".[mlx_decode]"
-python demo/demo_tts_podcast.py render --model miso --max-segments 6
+python hacks/podcast_demo/demo_tts_podcast.py render --model miso --max-segments 6
 ```
 
-Writes default `demo/demo_script.yaml` to`demo/output/podcast_miso.wav`, plus one wav per turn if `--save-turns` is enabled.
+Writes default `hacks/podcast_demo/demo_script.yaml` to `hacks/podcast_demo/output/podcast_miso.wav`, plus one wav per turn if `--save-turns` is enabled.
 
 ```yaml
 segments:

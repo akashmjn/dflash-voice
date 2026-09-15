@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Render a two-speaker podcast script with a native mlx-audio TTS backend.
 
-Usage:
-    python agent-workspace/demo/demo_tts_podcast.py render SCRIPT.yaml --model miso
-    python agent-workspace/demo/demo_tts_podcast.py render --takes 3  # re-roll the whole script
-    python agent-workspace/demo/demo_tts_podcast.py warmup   # re-roll priming clips
+Usage (from repo root):
+    python hacks/podcast_demo/demo_tts_podcast.py render SCRIPT.yaml --model miso
+    python hacks/podcast_demo/demo_tts_podcast.py render --takes 3  # re-roll the whole script
+    python hacks/podcast_demo/demo_tts_podcast.py warmup   # re-roll priming clips
+
+Or from this directory:
+    python demo_tts_podcast.py render --model miso --max-segments 6
 
 The script is a YAML list of ``{speaker: 0|1, text: ...}`` segments. Segments are
 generated one at a time, and each generated turn is fed back as conversational
@@ -257,7 +260,7 @@ def render(
     script: Path = typer.Argument(DEFAULT_DEMO_SCRIPT, help="YAML script of two-speaker segments"),
     model: str = typer.Option("miso", help="TTS backend"),
     model_id: str = typer.Option(None, help="override the backend's default model id"),
-    max_turns: int = typer.Option(None, help="render only the first N segments"),
+    max_segments: int = typer.Option(None, help="render only the first N segments"),
     context_seconds: float = typer.Option(
         DEFAULT_CONTEXT_SECONDS, help="max seconds of past audio kept as context"
     ),
@@ -287,8 +290,8 @@ def render(
         )
 
     segments = load_script(script)
-    if max_turns:
-        segments = segments[:max_turns]
+    if max_segments:
+        segments = segments[:max_segments]
 
     resolved_id = model_id or MODELS[model]
 

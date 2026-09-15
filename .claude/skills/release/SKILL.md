@@ -18,7 +18,7 @@ description: Promote finished work from dev onto main in this repo. Use when the
    ```
 2. Pull only the intended paths from `dev` onto `main`, as an explicit allowlist (never a wildcard that could catch dev-only dirs like `train/`):
    ```bash
-   git checkout dev -- dataprep/ mlx_decode/ experiments/ demo/ README.md pyproject.toml
+   git checkout dev -- dataprep/ mlx_decode/ experiments/ README.md pyproject.toml
    ```
    Adjust the path list to what's actually changing — do not blanket-copy the whole tree.
 3. Verify nothing dev-only leaked in:
