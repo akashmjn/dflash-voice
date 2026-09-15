@@ -1,4 +1,4 @@
-# dflash-voice: Exploring efficient audio generation 
+# Exploring efficient audio generation 
 
 Local inference of popular open-source TTS/omni models is bottlenecked (> 50%) by repeated forward passes of smaller models to generate audio tokens vs larger LLM-based backbones that handle semantics/prosody.
 
