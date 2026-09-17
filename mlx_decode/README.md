@@ -22,8 +22,9 @@ ref_audio>`. Conditioning and codec decode are reported per utterance, generatio
 python mlx_decode/bench.py bench --model cbox-ar --ref-audio-dir mlx_decode/prompts/ref_audio
 ```
 
-Only `cbox-ar` takes a reference clip, and its checkpoint ships no `conds.safetensors`, so it
-requires `--ref-audio-dir`. The other wrappers carry their conditionals in the checkpoint.
+Only the chatterbox wrappers take a reference clip. `cbox-ar`'s checkpoint ships no
+`conds.safetensors`, so it requires `--ref-audio-dir`; for `cbox-turbo` and `cbox-nano` the flag is
+optional and overrides the voice their checkpoint bundles.
 
 Key components of the inference loop are ported: (prompt construction, autoregression, codec decode) while leveraging weights and `nn.Module` definitions from mlx-audio.
 pytests verify parity of the ported inference loop with reference `mlx-audio` implementations, on both generated audio and wall-clock generation time.

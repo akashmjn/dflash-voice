@@ -205,6 +205,17 @@ class ChatterboxTurbo:
     def sample_rate(self) -> int:
         return self._model.sample_rate
 
+    def set_reference(self, path: str) -> float:
+        """Encode a reference clip into voice conditionals; returns seconds taken.
+
+        Overrides the conds.safetensors the checkpoint ships with.
+        """
+        t_start = time.perf_counter()
+        self._model.prepare_conditionals(path)
+        # MLX is lazy: without this the returned time excludes the actual encode.
+        mx.eval(self._model._conds.t3.speaker_emb, self._model._conds.gen["prompt_feat"])
+        return time.perf_counter() - t_start
+
     def generate(
         self,
         text: str,
