@@ -191,6 +191,30 @@ def _decode_tokens(model, token_ids: List[int]) -> mx.array:
 
 
 # ---------------------------------------------------------------------------
+# Reference conditioning
+# ---------------------------------------------------------------------------
+
+# upstream prepare_conditionals asserts the clip is longer than this
+MIN_REF_AUDIO_S = 5.0
+
+
+def _pad_reference(audio, sample_rate: int):
+    """Repeat a short clip until it clears the upstream length floor.
+
+    Tiled rather than silence-padded: the voice encoder and S3Tokenizer embed
+    fixed windows of the clip (15s and 10s), so trailing silence would leave
+    most of both windows empty and wash out the speaker embedding.
+    """
+    import numpy as np
+
+    target = int(MIN_REF_AUDIO_S * sample_rate) + 1
+    if len(audio) >= target:
+        return audio
+    reps = -(-target // max(len(audio), 1))
+    return np.tile(audio, reps)[:target]
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -210,8 +234,13 @@ class ChatterboxTurbo:
 
         Overrides the conds.safetensors the checkpoint ships with.
         """
+        import soundfile as sf
+
         t_start = time.perf_counter()
-        self._model.prepare_conditionals(path)
+        audio, sr = sf.read(path, dtype="float32", always_2d=False)
+        if audio.ndim > 1:
+            audio = audio.mean(axis=1)
+        self._model.prepare_conditionals(_pad_reference(audio, sr), sample_rate=sr)
         # MLX is lazy: without this the returned time excludes the actual encode.
         mx.eval(self._model._conds.t3.speaker_emb, self._model._conds.gen["prompt_feat"])
         return time.perf_counter() - t_start
