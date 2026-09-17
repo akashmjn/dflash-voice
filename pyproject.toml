@@ -18,6 +18,10 @@ dependencies = [
 include = ["mlx_decode*", "dataprep*", "train*"]
 exclude = ["mlx_decode.tests*", "dataprep.tests*", "train.tests*"]
 
+[tool.setuptools.package-data]
+# bench.py reads both at runtime, so they must ship with the package.
+mlx_decode = ["models.yaml", "prompts/*.jsonl"]
+
 [project.optional-dependencies]
 
 dev = [
@@ -32,7 +36,21 @@ mlx_decode = [
     "mlx-audio==0.4.4",
     "transformers==5.6.0",
     "huggingface-hub==1.5.0",
+    # bench.py reads its model registry from models.yaml.
+    "pyyaml>=6.0",
     # Voxtral builds its prompt with the Mistral speech tokenizer.
+    "mistral-common[audio]>=1.11.7",
+]
+
+# Same as mlx_decode, but mlx-audio comes from the fork with Chatterbox
+# nano support instead of the PyPI release.
+mlx_decode_cbox = [
+    "mlx>=0.31.1",
+    "mlx-lm==0.31.1",
+    "mlx-audio @ git+https://github.com/akashmjn/mlx-audio.git@akash/nano-support",
+    "transformers==5.6.0",
+    "huggingface-hub==1.5.0",
+    "pyyaml>=6.0",
     "mistral-common[audio]>=1.11.7",
 ]
 

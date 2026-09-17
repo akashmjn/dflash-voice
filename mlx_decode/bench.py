@@ -5,9 +5,13 @@ Every model generates one codec frame per autoregressive step, so all timings ar
 reported per step: backbone (semantic token) and depth decoder (remaining
 codebooks) separately, plus codec decode.
 
+Models are registered in ``models.yaml`` and prompts read from a JSONL file in
+seedtts_test_en.jsonl's shape, defaulting to ``prompts/default.jsonl``.
+
 ```bash
 python mlx_decode/bench.py bench --model miso --save-audio
 python mlx_decode/bench.py bench --model all      # or a comma-separated list
+python mlx_decode/bench.py bench --model cbox-ar --prompts-file seedtts_test_en.jsonl -n 50
 python mlx_decode/bench.py summarize              # table from saved metrics.json
 ```
 """
@@ -23,98 +27,20 @@ from pathlib import Path
 from typing import Any, Optional
 
 import typer
+import yaml
 from rich import print
 from tqdm import tqdm
 
 from mlx_decode import GenerationProfile
 
 
-WARMUP_DIR = Path(__file__).resolve().parent / "warmup"
-
-MODELS = {
-    "qwen3": {
-        "frame_rate_hz": 12.5,
-        "decoder_iterations": 15,
-        "model_id": "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit",
-        "generate": {
-            "voice": "Ryan",
-            "language": "auto",
-            "temperature": 0.9,
-            "top_k": 50,
-            "top_p": 1.0,
-            "max_tokens": 1024,
-        },
-    },
-    "fish": {
-        "frame_rate_hz": 21.0,
-        "decoder_iterations": 9,
-        "model_id": "mlx-community/fish-audio-s2-pro-8bit",
-        "generate": {
-            "temperature": 0.7,
-            "top_k": 30,
-            "top_p": 0.7,
-            "max_tokens": 1024,
-        },
-    },
-    "voxtral": {
-        "frame_rate_hz": 12.5,
-        "decoder_iterations": 7,
-        "model_id": "mlx-community/Voxtral-4B-TTS-2603-mlx-6bit",
-        # No sampling knobs: argmax semantic code, flow-matched acoustic codes.
-        "generate": {
-            "voice": "casual_male",
-            "max_tokens": 1024,
-        },
-    },
-    # Single-codebook AR: backbone generations FSQ codes, no separate audio token decoder.
-    "cbox-ar": {
-        "frame_rate_hz": 25.0,
-        "decoder_iterations": None,
-        "module": "cbox_ar",
-        "model_id": "mlx-community/Chatterbox-TTS-8bit",
-        # The checkpoint carries no conds.safetensors, so a voice must be
-        # supplied. Encoded once at load, outside the timed region.
-        "load_kwargs": {"ref_audio": str(WARMUP_DIR / "jensen-30sec.wav")},
-        "generate": {
-            "temperature": 0.8,
-            "min_p": 0.05,
-            "top_p": 1.0,
-            "repetition_penalty": 1.2,
-            "cfg_weight": 0.5,
-            "max_tokens": 1000,
-        },
-    },
-    "miso": {
-        "frame_rate_hz": 12.5,
-        "decoder_iterations": 31,
-        "model_id": "mlx-community/MisoLabs-MisoTTS-8bit",
-        "generate": {
-            "temperature": 0.9,
-            "top_k": 60,
-            "top_p": 1.0,
-            "max_tokens": 1024,
-        },
-    },
-}
+MLX_DECODE_DIR = Path(__file__).resolve().parent
+REF_AUDIO_DIR = MLX_DECODE_DIR / "prompts" / "ref_audio"
+DEFAULT_PROMPTS_FILE = MLX_DECODE_DIR / "prompts" / "default.jsonl"
 
 WARMUP_PROMPT = "Hello, quick mic check."
 
-PROMPTS = [
-    "Hello, quick mic check... testing... 1 2 3...",
-    "Hello, this is a quick text to speech test on Apple Silicon.",
-    "The price is $42.99 — call 555-0123 today!",
-    "What is the capital of France, and why is it historically significant?",
-    (
-        "The quick brown fox jumps over the lazy dog. "
-        "Speech synthesis on Apple Silicon should feel fast and natural."
-    ),
-    (
-        "In a world where artificial intelligence transforms how we communicate, "
-        "voice synthesis stands at the frontier of human-computer interaction. "
-        "Real-time text-to-speech enables assistants, accessibility tools, and "
-        "creative applications that were unimaginable a decade ago."
-    ),
-]
+MODELS = yaml.safe_load((MLX_DECODE_DIR / "models.yaml").read_text())
 
 DEFAULT_OUTPUT_DIR = Path("mlx_decode/output")
 
@@ -122,16 +48,17 @@ DEFAULT_OUTPUT_DIR = Path("mlx_decode/output")
 # Miso being a base model appears to be unstable when generating from empty context 
 # some preconditioning makes better generations -- at the cost of comparable timings.
 MISO_CONTEXT = [
-    (0, "Okay we're recording! Let's get into it.", str(WARMUP_DIR / "warmup_spk0.wav")),
-    (1, "Sounds good, ready when you are!", str(WARMUP_DIR / "warmup_spk1.wav")),
+    (0, "Okay we're recording! Let's get into it.", str(REF_AUDIO_DIR / "warmup_spk0.wav")),
+    (1, "Sounds good, ready when you are!", str(REF_AUDIO_DIR / "warmup_spk1.wav")),
 ]
 
 
-def _load_prompts(path: Path | None) -> list[str]:
-    if path is None:
-        return PROMPTS
-    lines = path.read_text().splitlines()
-    return [json.loads(line)["text"] for line in lines if line.strip()]
+def _load_prompts(path: Path) -> list[dict[str, str]]:
+    """Read JSONL prompts in seedtts_test_en.jsonl's shape: a 'text' per line,
+    plus an optional 'id' that labels the prompt and names its wav."""
+    lines = [line for line in path.read_text().splitlines() if line.strip()]
+    rows = [json.loads(line) for line in lines]
+    return [{**row, "id": str(row.get("id", idx))} for idx, row in enumerate(rows)]
 
 
 def _output_dir(output_dir: Path, model: str, model_id: str) -> Path:
@@ -139,10 +66,10 @@ def _output_dir(output_dir: Path, model: str, model_id: str) -> Path:
     return output_dir / model / slug
 
 
-def _save_audio(out_dir: Path, idx: int, result) -> Path:
+def _save_audio(out_dir: Path, prompt_id: str, result) -> Path:
     from mlx_audio.audio_io import write as audio_write
 
-    path = out_dir / f"prompt_{idx:03d}.wav"
+    path = out_dir / f"{re.sub(r'[^A-Za-z0-9._-]+', '-', prompt_id)}.wav"
     path.parent.mkdir(parents=True, exist_ok=True)
     audio_write(path, result.audio, result.sample_rate, format="wav")
     return path
@@ -248,7 +175,8 @@ def _run(
     name: str,
     model_id: str,
     gen_kwargs: dict[str, Any],
-    prompts: list[str],
+    prompts: list[dict[str, str]],
+    prompts_file: Path,
     out_dir: Path,
     save_audio: bool,
     warmup: bool,
@@ -262,17 +190,19 @@ def _run(
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 
     profiles, results, rows = [], [], []
-    for idx, text in enumerate(tqdm(prompts, desc="Benchmarking")):
+    for idx, prompt in enumerate(tqdm(prompts, desc="Benchmarking")):
+        text = prompt["text"]
         profile = GenerationProfile()
         result = list(model.generate(text=text, profile=profile, **gen_kwargs))[0]
         profiles.append(profile)
         results.append(result)
 
-        audio_path = _save_audio(out_dir, idx, result) if save_audio else None
+        audio_path = _save_audio(out_dir, prompt["id"], result) if save_audio else None
         stats = _ms_stats(profile.step_timings, profile.codec_decode_s)
         rows.append(
             {
                 "idx": idx,
+                "id": prompt["id"],
                 "text": text,
                 "audio_path": audio_path.name if audio_path else None,
                 "num_steps": stats["n"],
@@ -311,6 +241,9 @@ def _run(
                 "model": name,
                 "model_id": model_id,
                 "settings": gen_kwargs,
+                # Which prompt set produced these timings -- step counts only
+                # compare across runs that used the same one.
+                "prompts_file": str(prompts_file),
                 "prompts": rows,
                 "aggregate": {
                     "num_prompts": len(profiles),
@@ -360,8 +293,12 @@ def bench(
     max_samples: Optional[int] = typer.Option(
         None, "--max-samples", "-n", help="Benchmark the first N prompts (default: all)."
     ),
-    prompts_file: Optional[Path] = typer.Option(
-        None, exists=True, dir_okay=False, help="JSONL file with a 'text' field per line."
+    prompts_file: Path = typer.Option(
+        DEFAULT_PROMPTS_FILE,
+        exists=True,
+        dir_okay=False,
+        help="JSONL prompts, one object per line with a 'text' field and an "
+        "optional 'id' (seedtts_test_en.jsonl's shape).",
     ),
     warmup: bool = typer.Option(True, help="Generate once before timing."),
     save_audio: bool = typer.Option(False, help="Write generated wav files."),
@@ -374,10 +311,10 @@ def bench(
         DEFAULT_OUTPUT_DIR, help="Root for saved audio and metrics."
     ),
 ) -> None:
-    """Benchmark one or more models over the built-in prompts (or --prompts-file).
+    """Benchmark one or more models over a JSONL prompt set.
 
-    Voice, style and sampling settings are not flags -- edit ``MODELS`` above so
-    a run is reproducible from the model name alone.
+    Voice, style and sampling settings are not flags -- edit ``models.yaml`` so a
+    run is reproducible from the model name alone.
     """
     names = _parse_models(model)
     if context and names != ["miso"]:
@@ -398,6 +335,7 @@ def bench(
                 model_id=resolved,
                 gen_kwargs=gen_kwargs,
                 prompts=prompts,
+                prompts_file=prompts_file,
                 out_dir=_output_dir(output_dir, name, resolved),
                 save_audio=save_audio,
                 warmup=warmup,

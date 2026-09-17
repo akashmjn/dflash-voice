@@ -1,0 +1,134 @@
+# Model registry for bench.py. Voice, style and sampling settings live here
+# rather than behind CLI flags, so a run is reproducible from the model name
+# alone. `module` defaults to the model name; `model_id` is a Hub repo or a
+# local path, and `load_kwargs` is passed straight to the module's load_model.
+
+qwen3:
+  frame_rate_hz: 12.5
+  decoder_iterations: 15
+  model_id: mlx-community/Qwen3-TTS-12Hz-1.7B-Base-8bit
+  generate:
+    voice: Ryan
+    language: auto
+    temperature: 0.9
+    top_k: 50
+    top_p: 1.0
+    max_tokens: 1024
+
+fish:
+  frame_rate_hz: 21.0
+  decoder_iterations: 9
+  model_id: mlx-community/fish-audio-s2-pro-8bit
+  generate:
+    temperature: 0.7
+    top_k: 30
+    top_p: 0.7
+    max_tokens: 1024
+
+voxtral:
+  frame_rate_hz: 12.5
+  decoder_iterations: 7
+  model_id: mlx-community/Voxtral-4B-TTS-2603-mlx-6bit
+  # No sampling knobs: argmax semantic code, flow-matched acoustic codes.
+  generate:
+    voice: casual_male
+    max_tokens: 1024
+
+# Single-codebook AR: backbone generates FSQ codes, no separate audio token decoder.
+cbox-ar:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_ar
+  model_id: mlx-community/Chatterbox-TTS-8bit
+  # The checkpoint carries no conds.safetensors, so a voice must be supplied.
+  # Encoded once at load, outside the timed region.
+  load_kwargs:
+    ref_audio: /Users/Akash/SideProjects/study-tinker/voice-llm/dflash-voice/mlx_decode/prompts/ref_audio/jensen-30sec.wav
+  generate:
+    temperature: 0.8
+    min_p: 0.05
+    top_p: 1.0
+    repetition_penalty: 1.2
+    cfg_weight: 0.5
+    max_tokens: 1000
+
+cbox-ar-fp16:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_ar
+  model_id: mlx-community/Chatterbox-TTS-fp16
+  # The checkpoint carries no conds.safetensors, so a voice must be supplied.
+  # Encoded once at load, outside the timed region.
+  load_kwargs:
+    ref_audio: /Users/Akash/SideProjects/study-tinker/voice-llm/dflash-voice/mlx_decode/prompts/ref_audio/jensen-30sec.wav
+  generate:
+    temperature: 0.8
+    min_p: 0.05
+    top_p: 1.0
+    repetition_penalty: 1.2
+    cfg_weight: 0.5
+    max_tokens: 1000
+
+# Same control-case shape as cbox-ar, on a GPT-2 backbone with a meanflow
+# S3Gen. The checkpoint ships conds.safetensors, so no voice is supplied.
+cbox-turbo:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_turbo
+  model_id: mlx-community/Chatterbox-Turbo-TTS-8bit
+  generate:
+    temperature: 0.8
+    top_k: 1000
+    top_p: 0.95
+    repetition_penalty: 1.2
+    max_tokens: 1000
+
+# fp16 sibling of cbox-turbo; same family, same conds. Kept as its own entry
+# so `summarize` renders it as a separate row.
+cbox-turbo-fp16:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_turbo
+  model_id: mlx-community/Chatterbox-Turbo-TTS-fp16
+  generate:
+    temperature: 0.8
+    top_k: 1000
+    top_p: 0.95
+    repetition_penalty: 1.2
+    max_tokens: 1000
+
+# Nano is Turbo's smaller sibling: the same GPT-2 T3 at 12x768 instead of
+# 24x1024, sharing byte-identical S3Gen and voice-encoder weights.
+cbox-nano:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_turbo
+  model_id: akashmjn/Chatterbox-Nano-TTS-8bit
+  generate:
+    temperature: 0.8
+    top_k: 1000
+    top_p: 0.95
+    repetition_penalty: 1.2
+    max_tokens: 1000
+
+cbox-nano-fp16:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_turbo
+  model_id: akashmjn/Chatterbox-Nano-TTS-fp16
+  generate:
+    temperature: 0.8
+    top_k: 1000
+    top_p: 0.95
+    repetition_penalty: 1.2
+    max_tokens: 1000
+
+miso:
+  frame_rate_hz: 12.5
+  decoder_iterations: 31
+  model_id: mlx-community/MisoLabs-MisoTTS-8bit
+  generate:
+    temperature: 0.9
+    top_k: 60
+    top_p: 1.0
+    max_tokens: 1024
