@@ -39,6 +39,8 @@ from dataprep.pipeline import (
 
 MODELS = ("miso", "chatterbox")
 DATASETS = ("emilia", "expresso")
+#: Fetched to disk rather than streamed, so these are not `--dataset` loaders.
+FETCH_DATASETS = ("seedtts",)
 STAGES = ("tokenize", "featurize", "all")
 
 MODEL_HELP = "tokenizer backend: miso, chatterbox"
@@ -89,6 +91,45 @@ def _tokenizer_device(tokenizer: Any) -> str:
 def _check_model(model: str) -> None:
     if model not in MODELS:
         raise typer.BadParameter(f"model must be one of {' / '.join(MODELS)}")
+
+
+@app.command("fetch")
+def fetch_command(
+    dataset: str = typer.Option(
+        "seedtts", help=f"eval set to download: {' / '.join(FETCH_DATASETS)}"
+    ),
+    rows: Optional[int] = typer.Option(
+        None,
+        help="only fetch the clips the first N prompts cite (default: all). "
+        "Rows reuse clips, so this is far fewer files than N",
+    ),
+    data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
+) -> None:
+    """Download an eval set for the decode bench, not for sharding.
+
+    Writes prompts/ and a flat ref_audio/ under DATA_ROOT/DATASET, which is
+    what `mlx_decode/bench.py --ref-audio-dir` expects.
+    """
+    if dataset not in FETCH_DATASETS:
+        raise typer.BadParameter(
+            f"fetch supports {' / '.join(FETCH_DATASETS)}; "
+            f"{' / '.join(DATASETS)} are streamed by prepare instead"
+        )
+    if rows is not None and rows < 1:
+        raise typer.BadParameter("--rows requires a positive count")
+
+    from dataprep.datasources.seedtts import fetch_seedtts
+
+    dest = data_root / dataset
+    typer.echo(f"dataset    : {dataset}")
+    typer.echo(f"destination: {dest}")
+    typer.echo(f"prompts    : {rows if rows is not None else 'all'}")
+
+    result = fetch_seedtts(dest, limit=rows)
+
+    typer.echo(f"prompts    : {result['prompts']}")
+    typer.echo(f"ref audio  : {result['ref_audio']} ({result['wavs']} wavs)")
+    typer.echo(f"extracted  : {result['extracted']} new")
 
 
 @app.command("inspect")

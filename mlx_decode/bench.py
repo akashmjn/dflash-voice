@@ -199,6 +199,10 @@ def _run(
             f"{name}'s checkpoint ships no conds.safetensors; pass --ref-audio-dir."
         )
     if warmup:
+        # A checkpoint shipping no conds cannot generate until a reference is
+        # set, so warm up on the first prompt's clip rather than unconditioned.
+        if ref_audio_dir is not None and prompts:
+            model.set_reference(str(ref_audio_dir / Path(prompts[0]["ref_audio"]).name))
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 
     profiles, results, rows = [], [], []
