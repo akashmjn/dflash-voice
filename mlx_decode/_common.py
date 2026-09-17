@@ -32,6 +32,8 @@ class GenerationProfile:
     step_timings: List[StepTiming] = field(default_factory=list)
     codec_decode_s: float = 0.0
     num_steps: int = 0
+    # Zero unless a per-utterance reference clip was encoded.
+    conditioning_s: float = 0.0
 
 
 @dataclass

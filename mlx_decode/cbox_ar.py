@@ -11,9 +11,7 @@ Generation uses classifier-free guidance, so each step runs the backbone on a
 batch of 2 (conditional + unconditional).
 
 The mlx-community checkpoint ships no ``conds.safetensors``, so a reference clip
-is required to condition generation. ``prepare_conditionals`` runs once at load
-(see ``set_reference``) rather than per prompt, keeping voice encoding out of the
-timed region.
+is required to condition generation (see ``set_reference``).
 
 Ported from mlx-audio 0.4.4
 (https://github.com/Blaizzy/mlx-audio, PyPI: mlx-audio==0.4.4),
@@ -232,16 +230,25 @@ class ChatterboxAR:
     def sample_rate(self) -> int:
         return self._model.sample_rate
 
-    def set_reference(self, path: str, exaggeration: float = 0.1) -> None:
-        """Compute the voice conditionals once, outside any timed region."""
+    @property
+    def needs_reference(self) -> bool:
+        """No conds from the checkpoint, and none set yet -- generate() would fail."""
+        return self._model._conds is None
+
+    def set_reference(self, path: str, exaggeration: float = 0.1) -> float:
+        """Encode a reference clip into voice conditionals; returns seconds taken."""
         import soundfile as sf
 
+        t_start = time.perf_counter()
         audio, sr = sf.read(path, dtype="float32", always_2d=False)
         if audio.ndim > 1:
             audio = audio.mean(axis=1)
         self._model._conds = self._model.prepare_conditionals(
             mx.array(audio), sr, exaggeration
         )
+        # MLX is lazy: without this the returned time excludes the actual encode.
+        mx.eval(self._model._conds.t3.speaker_emb, self._model._conds.gen["prompt_feat"])
+        return time.perf_counter() - t_start
 
     def generate(
         self,

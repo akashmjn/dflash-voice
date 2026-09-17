@@ -40,10 +40,6 @@ cbox-ar:
   decoder_iterations: null
   module: cbox_ar
   model_id: mlx-community/Chatterbox-TTS-8bit
-  # The checkpoint carries no conds.safetensors, so a voice must be supplied.
-  # Encoded once at load, outside the timed region.
-  load_kwargs:
-    ref_audio: /Users/Akash/SideProjects/study-tinker/voice-llm/dflash-voice/mlx_decode/prompts/ref_audio/jensen-30sec.wav
   generate:
     temperature: 0.8
     min_p: 0.05
@@ -57,10 +53,6 @@ cbox-ar-fp16:
   decoder_iterations: null
   module: cbox_ar
   model_id: mlx-community/Chatterbox-TTS-fp16
-  # The checkpoint carries no conds.safetensors, so a voice must be supplied.
-  # Encoded once at load, outside the timed region.
-  load_kwargs:
-    ref_audio: /Users/Akash/SideProjects/study-tinker/voice-llm/dflash-voice/mlx_decode/prompts/ref_audio/jensen-30sec.wav
   generate:
     temperature: 0.8
     min_p: 0.05

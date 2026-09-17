@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Benchmark the MLX TTS wrappers in this package with optional audio export.
 
-Every model generates one codec frame per autoregressive step, so all timings are
+Every model generates one codec frame per autoregressive step, so generation is
 reported per step: backbone (semantic token) and depth decoder (remaining
-codebooks) separately, plus codec decode.
+codebooks) separately. Codec decode and reference-clip conditioning each run
+once over the whole utterance, and are reported as per-utterance totals.
 
 Models are registered in ``models.yaml`` and prompts read from a JSONL file in
 seedtts_test_en.jsonl's shape, defaulting to ``prompts/default.jsonl``.
@@ -12,6 +13,7 @@ seedtts_test_en.jsonl's shape, defaulting to ``prompts/default.jsonl``.
 python mlx_decode/bench.py bench --model miso --save-audio
 python mlx_decode/bench.py bench --model all      # or a comma-separated list
 python mlx_decode/bench.py bench --model cbox-ar --prompts-file seedtts_test_en.jsonl -n 50
+python mlx_decode/bench.py bench --model cbox-ar --ref-audio-dir prompts/ref_audio
 python mlx_decode/bench.py summarize              # table from saved metrics.json
 ```
 """
@@ -75,7 +77,7 @@ def _save_audio(out_dir: Path, prompt_id: str, result) -> Path:
     return path
 
 
-def _ms_stats(timings, decode_s: float) -> dict[str, float]:
+def _ms_stats(timings, decode_s: float, conditioning_s: float = 0.0) -> dict[str, float]:
     gen = [t.total_s * 1000 for t in timings]
     n = len(gen)
     return {
@@ -89,7 +91,7 @@ def _ms_stats(timings, decode_s: float) -> dict[str, float]:
         if n
         else 0.0,
         "decode_total": decode_s * 1000,
-        "decode_mean": decode_s * 1000 / n if n else 0.0,
+        "cond_total": conditioning_s * 1000,
         "rate": n / (sum(gen) / 1000) if n else 0.0,
     }
 
@@ -104,7 +106,9 @@ def _print_stats(s: dict[str, float]) -> None:
         f"depth_audio {s['depth_mean']:.1f}), "
         f"{s['rate']:.1f} steps/s"
     )
-    print(f"  codec decode: {s['decode_total']:.0f} ms ({s['decode_mean']:.1f} ms/step)")
+    print(f"  codec decode: {s['decode_total']:.0f} ms (one pass per utterance)")
+    if s.get("cond_total"):
+        print(f"  conditioning: {s['cond_total']:.0f} ms (per utterance, outside decode)")
 
 
 def _timing_metrics(s: dict[str, float]) -> dict[str, Any]:
@@ -116,7 +120,8 @@ def _timing_metrics(s: dict[str, float]) -> dict[str, Any]:
             "depth_audio_per_step": s["depth_mean"],
             "steps_per_s": s["rate"],
         },
-        "codec_decode_ms": {"total": s["decode_total"], "per_step": s["decode_mean"]},
+        "codec_decode_ms": {"total": s["decode_total"]},
+        "conditioning_ms": {"total": s.get("cond_total", 0.0)},
     }
 
 
@@ -177,6 +182,7 @@ def _run(
     gen_kwargs: dict[str, Any],
     prompts: list[dict[str, str]],
     prompts_file: Path,
+    ref_audio_dir: Optional[Path],
     out_dir: Path,
     save_audio: bool,
     warmup: bool,
@@ -186,6 +192,12 @@ def _run(
     module = spec.get("module", name)
     load = importlib.import_module(f"mlx_decode.{module}").load_model
     model = load(model_id, **spec.get("load_kwargs", {}))
+    if ref_audio_dir is not None and not hasattr(model, "set_reference"):
+        raise typer.BadParameter(f"{name} cannot be conditioned on a reference clip.")
+    if ref_audio_dir is None and getattr(model, "needs_reference", False):
+        raise typer.BadParameter(
+            f"{name}'s checkpoint ships no conds.safetensors; pass --ref-audio-dir."
+        )
     if warmup:
         list(model.generate(text=WARMUP_PROMPT, **gen_kwargs))
 
@@ -193,17 +205,23 @@ def _run(
     for idx, prompt in enumerate(tqdm(prompts, desc="Benchmarking")):
         text = prompt["text"]
         profile = GenerationProfile()
+        if ref_audio_dir is not None:
+            ref_path = ref_audio_dir / Path(prompt["ref_audio"]).name
+            profile.conditioning_s = model.set_reference(str(ref_path))
         result = list(model.generate(text=text, profile=profile, **gen_kwargs))[0]
         profiles.append(profile)
         results.append(result)
 
         audio_path = _save_audio(out_dir, prompt["id"], result) if save_audio else None
-        stats = _ms_stats(profile.step_timings, profile.codec_decode_s)
+        stats = _ms_stats(
+            profile.step_timings, profile.codec_decode_s, profile.conditioning_s
+        )
         rows.append(
             {
                 "idx": idx,
                 "id": prompt["id"],
                 "text": text,
+                "ref_audio": prompt.get("ref_audio") if ref_audio_dir else None,
                 "audio_path": audio_path.name if audio_path else None,
                 "num_steps": stats["n"],
                 "audio_duration": result.audio_duration,
@@ -225,6 +243,7 @@ def _run(
     stats = _ms_stats(
         [t for p in profiles for t in p.step_timings],
         sum(p.codec_decode_s for p in profiles),
+        sum(p.conditioning_s for p in profiles),
     )
     mean_rtf = statistics.mean(r.real_time_factor for r in results)
     print(f"\n{'=' * 50}")
@@ -300,6 +319,12 @@ def bench(
         help="JSONL prompts, one object per line with a 'text' field and an "
         "optional 'id' (seedtts_test_en.jsonl's shape).",
     ),
+    ref_audio_dir: Optional[Path] = typer.Option(
+        None,
+        exists=True,
+        file_okay=False,
+        help="Where to find speaker voice references keyed by `ref_audio` in prompts file. Only used for models that support voice cloning."
+    ),
     warmup: bool = typer.Option(True, help="Generate once before timing."),
     save_audio: bool = typer.Option(False, help="Write generated wav files."),
     context: bool = typer.Option(
@@ -323,6 +348,13 @@ def bench(
         raise typer.BadParameter("--model-id names a single checkpoint; benchmark one model.")
 
     prompts = _load_prompts(prompts_file)[:max_samples]
+    if ref_audio_dir is not None:
+        missing = [p["id"] for p in prompts if not p.get("ref_audio")]
+        if missing:
+            raise typer.BadParameter(
+                f"--ref-audio-dir needs a 'ref_audio' on every prompt; {len(missing)} "
+                f"lack one (e.g. {missing[:3]})."
+            )
     rows = []
     for name in names:
         resolved = model_id or MODELS[name]["model_id"]
@@ -336,6 +368,7 @@ def bench(
                 gen_kwargs=gen_kwargs,
                 prompts=prompts,
                 prompts_file=prompts_file,
+                ref_audio_dir=ref_audio_dir,
                 out_dir=_output_dir(output_dir, name, resolved),
                 save_audio=save_audio,
                 warmup=warmup,
