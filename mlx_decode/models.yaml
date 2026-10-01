@@ -34,19 +34,16 @@ voxtral:
     voice: casual_male
     max_tokens: 1024
 
-# Single-codebook AR: backbone generates FSQ codes, no separate audio token decoder.
-cbox-ar:
-  frame_rate_hz: 25.0
-  decoder_iterations: null
-  module: cbox_ar
-  model_id: mlx-community/Chatterbox-TTS-8bit
+miso:
+  frame_rate_hz: 12.5
+  decoder_iterations: 31
+  model_id: mlx-community/MisoLabs-MisoTTS-8bit
   generate:
-    temperature: 0.8
-    min_p: 0.05
+    temperature: 0.9
+    top_k: 60
     top_p: 1.0
-    repetition_penalty: 1.2
-    cfg_weight: 0.5
-    max_tokens: 1000
+    max_tokens: 1024
+
 
 cbox-ar-fp16:
   frame_rate_hz: 25.0
@@ -61,22 +58,6 @@ cbox-ar-fp16:
     cfg_weight: 0.5
     max_tokens: 1000
 
-# Same control-case shape as cbox-ar, on a GPT-2 backbone with a meanflow
-# S3Gen. The checkpoint ships conds.safetensors, so no voice is supplied.
-cbox-turbo:
-  frame_rate_hz: 25.0
-  decoder_iterations: null
-  module: cbox_turbo
-  model_id: mlx-community/Chatterbox-Turbo-TTS-8bit
-  generate:
-    temperature: 0.8
-    top_k: 1000
-    top_p: 0.95
-    repetition_penalty: 1.2
-    max_tokens: 1000
-
-# fp16 sibling of cbox-turbo; same family, same conds. Kept as its own entry
-# so `summarize` renders it as a separate row.
 cbox-turbo-fp16:
   frame_rate_hz: 25.0
   decoder_iterations: null
@@ -89,13 +70,11 @@ cbox-turbo-fp16:
     repetition_penalty: 1.2
     max_tokens: 1000
 
-# Nano is Turbo's smaller sibling: the same GPT-2 T3 at 12x768 instead of
-# 24x1024, sharing byte-identical S3Gen and voice-encoder weights.
-cbox-nano:
+cbox-nano-fp16:
   frame_rate_hz: 25.0
   decoder_iterations: null
   module: cbox_turbo
-  model_id: akashmjn/Chatterbox-Nano-TTS-8bit
+  model_id: akashmjn/Chatterbox-Nano-TTS-fp16
   generate:
     temperature: 0.8
     top_k: 1000
@@ -103,11 +82,37 @@ cbox-nano:
     repetition_penalty: 1.2
     max_tokens: 1000
 
-cbox-nano-fp16:
+
+cbox-ar-8bit:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_ar
+  model_id: mlx-community/Chatterbox-TTS-8bit
+  generate:
+    temperature: 0.8
+    min_p: 0.05
+    top_p: 1.0
+    repetition_penalty: 1.2
+    cfg_weight: 0.5
+    max_tokens: 1000
+
+cbox-turbo-8bit:
   frame_rate_hz: 25.0
   decoder_iterations: null
   module: cbox_turbo
-  model_id: akashmjn/Chatterbox-Nano-TTS-fp16
+  model_id: mlx-community/Chatterbox-Turbo-TTS-8bit
+  generate:
+    temperature: 0.8
+    top_k: 1000
+    top_p: 0.95
+    repetition_penalty: 1.2
+    max_tokens: 1000
+
+cbox-nano-8bit:
+  frame_rate_hz: 25.0
+  decoder_iterations: null
+  module: cbox_turbo
+  model_id: akashmjn/Chatterbox-Nano-TTS-8bit
   generate:
     temperature: 0.8
     top_k: 1000
