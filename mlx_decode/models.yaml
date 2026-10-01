@@ -50,6 +50,8 @@ cbox-ar-fp16:
   decoder_iterations: null
   module: cbox_ar
   model_id: mlx-community/Chatterbox-TTS-fp16
+  load_kwargs:
+    vocoder_model_id: mlx-community/Chatterbox-Turbo-TTS-fp16
   generate:
     temperature: 0.8
     min_p: 0.05
@@ -88,6 +90,8 @@ cbox-ar-8bit:
   decoder_iterations: null
   module: cbox_ar
   model_id: mlx-community/Chatterbox-TTS-8bit
+  load_kwargs:
+    vocoder_model_id: mlx-community/Chatterbox-Turbo-TTS-8bit
   generate:
     temperature: 0.8
     min_p: 0.05
@@ -120,12 +124,3 @@ cbox-nano-8bit:
     repetition_penalty: 1.2
     max_tokens: 1000
 
-miso:
-  frame_rate_hz: 12.5
-  decoder_iterations: 31
-  model_id: mlx-community/MisoLabs-MisoTTS-8bit
-  generate:
-    temperature: 0.9
-    top_k: 60
-    top_p: 1.0
-    max_tokens: 1024

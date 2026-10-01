@@ -8,16 +8,17 @@ uv pip install -e ".[mlx_decode]"
 # downloads models to HF_CACHE on first run
 # see models.yaml for available models
 python mlx_decode/bench.py bench --model <MODEL|all>
-python mlx_decode/bench.py summarize --model <MODEL|all>
+python mlx_decode/bench.py summarize [--output-dir OUTPUT_DIR]
 ```
 
 ### Usage for Chatterbox Seed-TTS evals
 
 ```bash
 python -m dataprep.cli fetch --dataset seedtts --rows 100
-python mlx_decode/bench.py bench --model MODEL \
+python mlx_decode/bench.py bench --model MODEL --slug RUN_NAME \
   --prompts-file data/seedtts/prompts/seedtts_test_en_100.jsonl \
   --ref-audio-dir data/seedtts/ref_audio -n 100 \
+  --save-audio \
   --output-dir OUTPUT_DIR
 ```
 

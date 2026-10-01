@@ -204,13 +204,13 @@ def _decode_tokens(model, token_ids: List[int]) -> mx.array:
         return mx.zeros((0,), dtype=mx.float32)
 
     mx.clear_cache()
-    wav = model.s3gen(
+    wav = model.s3gen.inference(
         speech_tokens=mx.array([ids], dtype=mx.int32),
         ref_dict=model._conds.gen,
-        finalize=True,
     )
-    if wav.ndim == 2:
-        wav = wav.squeeze(0)
+    if isinstance(wav, tuple):
+        wav = wav[0]
+    wav = wav.reshape(-1)
     mx.eval(wav)
     return wav
 
@@ -235,7 +235,7 @@ class ChatterboxAR:
         """No conds from the checkpoint, and none set yet -- generate() would fail."""
         return self._model._conds is None
 
-    def set_reference(self, path: str, exaggeration: float = 0.1) -> float:
+    def set_reference(self, path: str, exaggeration: float = 0.5) -> float:
         """Encode a reference clip into voice conditionals; returns seconds taken."""
         import soundfile as sf
 
@@ -313,14 +313,22 @@ class ChatterboxAR:
         mx.clear_cache()
 
 
-def load_model(model_id: str, ref_audio: Optional[str] = None) -> ChatterboxAR:
+def load_model(
+    model_id: str,
+    ref_audio: Optional[str] = None,
+    vocoder_model_id: Optional[str] = None,
+) -> ChatterboxAR:
     """Load a Chatterbox model via mlx-audio and wrap it for readable inference.
 
     ``ref_audio`` is required unless the checkpoint carries ``conds.safetensors``.
+    ``vocoder_model_id`` allows using S3Gen waveform vocoder from a different checkpoint.
     """
     from mlx_audio.tts.utils import load_model as _load
 
-    wrapper = ChatterboxAR(_load(model_id))
+    mlx_model = _load(model_id)
+    if vocoder_model_id is not None:
+        mlx_model.s3gen = _load(vocoder_model_id).s3gen
+    wrapper = ChatterboxAR(mlx_model)
     if ref_audio is not None:
         wrapper.set_reference(ref_audio)
     return wrapper

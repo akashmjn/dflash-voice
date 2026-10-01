@@ -63,9 +63,12 @@ def _load_prompts(path: Path) -> list[dict[str, str]]:
     return [{**row, "id": str(row.get("id", idx))} for idx, row in enumerate(rows)]
 
 
-def _output_dir(output_dir: Path, model: str, model_id: str) -> Path:
-    slug = re.sub(r"[^a-z0-9._-]+", "-", model_id.rsplit("/", 1)[-1].lower())
-    return output_dir / model / slug
+def _output_dir(
+    output_dir: Path, model: str, model_id: str, slug: Optional[str] = None
+) -> Path:
+    """``OUTPUT/<slug or model>/<checkpoint>``."""
+    ckpt = re.sub(r"[^a-z0-9._-]+", "-", model_id.rsplit("/", 1)[-1].lower())
+    return output_dir / (slug or model) / ckpt
 
 
 def _save_audio(out_dir: Path, prompt_id: str, result) -> Path:
@@ -184,6 +187,7 @@ def _run(
     prompts_file: Path,
     ref_audio_dir: Optional[Path],
     out_dir: Path,
+    slug: str,
     save_audio: bool,
     warmup: bool,
     spec: dict[str, Any],
@@ -262,6 +266,7 @@ def _run(
         json.dumps(
             {
                 "model": name,
+                "slug": slug,
                 "model_id": model_id,
                 "settings": gen_kwargs,
                 # Which prompt set produced these timings -- step counts only
@@ -280,7 +285,10 @@ def _run(
     )
     print(f"\nSaved metrics: {metrics_path}")
     return _summary_row(
-        label=model_id.rsplit("/", 1)[-1], stats=stats, mean_rtf=mean_rtf, spec=spec
+        label=slug if slug != name else model_id.rsplit("/", 1)[-1],
+        stats=stats,
+        mean_rtf=mean_rtf,
+        spec=spec,
     )
 
 
@@ -312,6 +320,11 @@ def bench(
     ),
     model_id: Optional[str] = typer.Option(
         None, help="Checkpoint id (default: the model's mlx-community build)."
+    ),
+    slug: Optional[str] = typer.Option(
+        None,
+        help="Name this run's output directory instead of the models.yaml model "
+        "name, so reruns and tweaks of one model are kept apart.",
     ),
     max_samples: Optional[int] = typer.Option(
         None, "--max-samples", "-n", help="Benchmark the first N prompts (default: all)."
@@ -350,6 +363,10 @@ def bench(
         raise typer.BadParameter(f"--context is miso-only, not supported for {names}")
     if model_id and len(names) > 1:
         raise typer.BadParameter("--model-id names a single checkpoint; benchmark one model.")
+    if slug and len(names) > 1:
+        raise typer.BadParameter("--slug names a single run directory; benchmark one model.")
+    if slug and re.search(r"[/\\]|^\.+$", slug):
+        raise typer.BadParameter("--slug must be a plain directory name.")
 
     prompts = _load_prompts(prompts_file)[:max_samples]
     if ref_audio_dir is not None:
@@ -373,7 +390,8 @@ def bench(
                 prompts=prompts,
                 prompts_file=prompts_file,
                 ref_audio_dir=ref_audio_dir,
-                out_dir=_output_dir(output_dir, name, resolved),
+                out_dir=_output_dir(output_dir, name, resolved, slug),
+                slug=slug or name,
                 save_audio=save_audio,
                 warmup=warmup,
                 spec=MODELS[name],
@@ -385,37 +403,39 @@ def bench(
 
 @app.command()
 def summarize(
-    model: str = typer.Option(
-        "all", help=f"Comma-separated model names, or 'all'. One of {tuple(MODELS)}."
-    ),
     output_dir: Path = typer.Option(
         DEFAULT_OUTPUT_DIR, help="Root the metrics were written to."
     ),
 ) -> None:
-    """Print the summary table from metrics.json files an earlier run saved.
+    """Print the summary table from every metrics.json an earlier run saved.
 
-    Every checkpoint benchmarked under a model's directory gets a row, so the
-    per-size variants (e.g. both Qwen3 builds) show up side by side.
+    One row per ``OUTPUT/<slug>/<checkpoint>/`` run, so --slug reruns and
+    per-size checkpoints (e.g. both Qwen3 builds) show up side by side.
     """
-    rows = []
-    for name in _parse_models(model):
-        for path in sorted((output_dir / name).glob("*/metrics.json")):
-            data = json.loads(path.read_text())
-            agg = data["aggregate"]
-            gen = agg["generate_ms"]
-            rows.append(
-                _summary_row(
-                    label=path.parent.name,
-                    stats={
-                        "gen_mean": gen["per_step"],
-                        "backbone_mean": gen["backbone_semantic_per_step"],
-                        "depth_mean": gen["depth_audio_per_step"],
-                        "rate": gen["steps_per_s"],
-                    },
-                    mean_rtf=agg["mean_rtf"],
-                    spec=MODELS[name],
-                )
+    rows, skipped = [], []
+    for path in sorted(output_dir.glob("*/*/metrics.json")):
+        data = json.loads(path.read_text())
+        # Frame rate and decoder iterations come from the run's models.yaml entry.
+        if data.get("model") not in MODELS:
+            skipped.append(str(path.parent.relative_to(output_dir)))
+            continue
+        agg = data["aggregate"]
+        gen = agg["generate_ms"]
+        rows.append(
+            _summary_row(
+                label=data["slug"] if data["slug"] != data["model"] else path.parent.name,
+                stats={
+                    "gen_mean": gen["per_step"],
+                    "backbone_mean": gen["backbone_semantic_per_step"],
+                    "depth_mean": gen["depth_audio_per_step"],
+                    "rate": gen["steps_per_s"],
+                },
+                mean_rtf=agg["mean_rtf"],
+                spec=MODELS[data["model"]],
             )
+        )
+    if skipped:
+        builtins.print(f"Skipped {len(skipped)} run(s) with no models.yaml entry: {', '.join(skipped)}")
     if not rows:
         raise typer.BadParameter(f"No metrics.json found under {output_dir}; run bench first.")
     _print_summary_table(rows)
