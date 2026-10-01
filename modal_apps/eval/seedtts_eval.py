@@ -464,13 +464,14 @@ def main(
     exaggeration: float = 0.5,
     wav_dir: str = "",
     test_list: str = "",
+    timeout_min: int = TIMEOUT_MINUTES,  # minutes, per function
 ):
     gen_stats: dict = {}
     scores: dict = {}
 
     if stage in ("all", "download"):
         print(">>> stage 1: download")
-        print(download.remote())
+        print(download.with_options(timeout=timeout_min * 60).remote())
 
     if stage == "upload":
         import json
@@ -496,7 +497,7 @@ def main(
             )
 
         print(f">>> upload: {len(ids)} wavs from {wav_dir}")
-        print(upload.remote(
+        print(upload.with_options(timeout=timeout_min * 60).remote(
             tag=tag, limit=limit,
             wavs=[(f"{i}.wav", found[i].read_bytes()) for i in sorted(ids)],
             test_list_text="\n".join(rows) + "\n",
@@ -504,14 +505,14 @@ def main(
 
     if stage in ("all", "generate"):
         print(">>> stage 3a: generate")
-        gen_stats = generate.remote(
+        gen_stats = generate.with_options(timeout=timeout_min * 60).remote(
             limit=limit, tag=tag,
             temperature=temperature, exaggeration=exaggeration,
         )
 
     if stage in ("all", "score", "upload"):
         print(">>> stage 3b: score")
-        scores = score.remote(tag=tag, limit=limit)
+        scores = score.with_options(timeout=timeout_min * 60).remote(tag=tag, limit=limit)
 
     print("\n" + "=" * 52)
     print(f"  Chatterbox TTS (AR) / Seed-TTS test-en ({tag})")
