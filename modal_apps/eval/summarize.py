@@ -1,10 +1,10 @@
-"""Collect scored eval runs off the Modal Volume into one CSV + table.
+"""Summarize fetched eval runs under results/SPLIT/ into SPLIT/summary.csv + a table.
 
-Reads the ``scored/*.log.console`` captures each run leaves behind, so it needs
-no GPU and re-reads nothing that has to be regenerated.
+Reads the ``*.log.console`` captures ``seedtts_eval.py`` fetches into
+``results/SPLIT/TAG/``; no Modal needed.
 
-    modal run modal_apps/eval/summarize.py
-    modal run modal_apps/eval/summarize.py --dataset-dir seedtts_en --out runs.csv
+    python modal_apps/eval/summarize.py                        # every split
+    python modal_apps/eval/summarize.py seedtts_en-limit100
 
 Per-row error counts come along with the headline metrics: a WER can look
 survivable while being driven by insertions, which is over-generation rather
@@ -13,17 +13,12 @@ than mis-transcription.
 
 from __future__ import annotations
 
-import modal
+import argparse
+import csv
+import pathlib
+import re
 
-
-VOL_NAME = "seedtts-eval-09-2026"
-VOL_ROOT = "/vol"
-RES_ROOT = f"{VOL_ROOT}/eval-09-2026"
-DEFAULT_DATASET_DIR = "seedtts_en-limit100"
-
-image = modal.Image.debian_slim(python_version="3.11")
-app = modal.App("seedtts-eval-summarize")
-vol = modal.Volume.from_name(VOL_NAME, create_if_missing=True)
+RESULTS = pathlib.Path(__file__).parent / "results"
 
 # Metric -> (log basename, pattern). Both spellings of the SIM/UTMOS summary
 # lines are accepted; which one is printed depends on the omnivoice version.
@@ -34,98 +29,90 @@ FIELDS = [
     ("wer_weighted_pct", "wer", [r"WER \(Weighted\):\s*([0-9.]+)%"]),
     ("utmos", "mos", [r"UTMOS score:\s*([0-9.]+)", r"Average UTMOS:\s*([0-9.]+)"]),
 ]
+COLS = ["tag", "n", "sim_o", "wer_pct", "utmos",
+        "wer_weighted_pct", "ins", "dele", "sub", "words"]
+SHOW = ["tag", "n", "sim_o", "wer_pct", "utmos", "ins", "dele", "sub"]
 
 
-@app.function(image=image, volumes={VOL_ROOT: vol}, timeout=10 * 60)
-def collect(dataset_dir: str = DEFAULT_DATASET_DIR) -> list[dict]:
-    import os
-    import re
+def _read(path: pathlib.Path) -> str:
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
 
-    root = f"{RES_ROOT}/{dataset_dir}"
-    if not os.path.isdir(root):
-        raise RuntimeError(f"{root} missing on volume {VOL_NAME}")
 
-    def last_match(path: str, patterns: list[str]) -> float | None:
-        if not os.path.exists(path):
-            return None
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            text = fh.read()
-        for pat in patterns:
-            hits = re.findall(pat, text, flags=re.MULTILINE)
-            if hits:
-                return float(hits[-1])
-        return None
+def _last(text: str, patterns: list[str]) -> float | None:
+    for pat in patterns:
+        hits = re.findall(pat, text, flags=re.MULTILINE)
+        if hits:
+            return float(hits[-1])
+    return None
 
+
+def collect(split_dir: pathlib.Path) -> list[dict]:
     rows = []
-    for tag in sorted(os.listdir(root)):
-        run_dir = f"{root}/{tag}"
-        if not os.path.isdir(run_dir):
-            continue
-
-        row: dict = {"tag": tag}
+    for run_dir in sorted(p for p in split_dir.iterdir() if p.is_dir()):
+        logs = {log: _read(run_dir / f"{log}.log.console") for log in ("sim", "wer", "mos")}
+        row: dict = {"tag": run_dir.name}
         for name, log, patterns in FIELDS:
-            row[name] = last_match(f"{run_dir}/scored/{log}.log.console", patterns)
+            row[name] = _last(logs[log], patterns)
 
-        wer_console = f"{run_dir}/scored/wer.log.console"
-        errs = None
-        if os.path.exists(wer_console):
-            with open(wer_console, encoding="utf-8", errors="replace") as fh:
-                hits = re.findall(
-                    r"Errors:\s*([0-9.]+) ins,\s*([0-9.]+) del,\s*([0-9.]+) sub"
-                    r"\s*/\s*([0-9]+) words", fh.read())
-            errs = hits[-1] if hits else None
+        errs = re.findall(
+            r"Errors:\s*([0-9.]+) ins,\s*([0-9.]+) del,\s*([0-9.]+) sub"
+            r"\s*/\s*([0-9]+) words", logs["wer"])
+        errs = errs[-1] if errs else None
         row.update(
             ins=float(errs[0]) if errs else None,
             dele=float(errs[1]) if errs else None,
             sub=float(errs[2]) if errs else None,
             words=int(errs[3]) if errs else None,
         )
-
-        gen = f"{run_dir}/generated"
-        row["wavs"] = (
-            sum(1 for f in os.listdir(gen) if f.endswith(".wav"))
-            if os.path.isdir(gen) else 0
-        )
+        # Rows scored: the fewest any scorer processed.
+        counts = [int(m) for text in logs.values()
+                  for m in re.findall(r"Processed (\d+)/\d+", text)[-1:]]
+        row["n"] = min(counts) if counts else None
         rows.append(row)
     return rows
 
 
-@app.local_entrypoint()
-def main(dataset_dir: str = DEFAULT_DATASET_DIR, out: str = ""):
-    import csv
-    import pathlib
+def cell(row: dict, key: str) -> str:
+    v = row.get(key)
+    if v is None:
+        return "-"
+    if key in ("sim_o", "utmos"):
+        return f"{v:.3f}"
+    if key.endswith("_pct"):
+        return f"{v:.2f}%"
+    return f"{v:g}" if isinstance(v, (int, float)) else str(v)
 
-    rows = collect.remote(dataset_dir=dataset_dir)
+
+def summarize(split_dir: pathlib.Path) -> None:
+    rows = collect(split_dir)
     if not rows:
-        print(f"no runs under {dataset_dir}")
+        print(f"no runs under {split_dir}")
         return
-
-    cols = ["tag", "wavs", "sim_o", "wer_pct", "utmos",
-            "wer_weighted_pct", "ins", "dele", "sub", "words"]
-    out_path = pathlib.Path(out or f"agent-workspace/eval_summary_{dataset_dir}.csv")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path = split_dir / "summary.csv"
     with out_path.open("w", newline="", encoding="utf-8") as fh:
-        writer = csv.DictWriter(fh, fieldnames=cols)
+        writer = csv.DictWriter(fh, fieldnames=COLS)
         writer.writeheader()
         writer.writerows(rows)
 
-    def cell(row: dict, key: str) -> str:
-        v = row.get(key)
-        if v is None:
-            return "-"
-        if key in ("sim_o", "utmos"):
-            return f"{v:.3f}"
-        if key.endswith("_pct"):
-            return f"{v:.2f}%"
-        return f"{v:g}" if isinstance(v, (int, float)) else str(v)
-
-    show = ["tag", "wavs", "sim_o", "wer_pct", "utmos", "ins", "dele", "sub"]
-    widths = {c: max(len(c), max(len(cell(r, c)) for r in rows)) for c in show}
-    header = "  ".join(c.ljust(widths[c]) for c in show)
-    print(f"\n{dataset_dir}\n")
+    widths = {c: max(len(c), max(len(cell(r, c)) for r in rows)) for c in SHOW}
+    header = "  ".join(c.ljust(widths[c]) for c in SHOW)
+    print(f"\n{split_dir.name}\n")
     print(header)
     print("-" * len(header))
-    for row in sorted(rows, key=lambda r: r["tag"]):
-        print("  ".join(cell(row, c).ljust(widths[c]) for c in show))
+    for row in rows:
+        print("  ".join(cell(row, c).ljust(widths[c]) for c in SHOW))
     print(f"\nwrote {out_path} ({len(rows)} runs)")
-    return rows
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("splits", nargs="*",
+                        help="split dirs under results/ (default: all)")
+    args = parser.parse_args()
+    splits = args.splits or sorted(p.name for p in RESULTS.iterdir() if p.is_dir())
+    for split in splits:
+        summarize(RESULTS / split)
+
+
+if __name__ == "__main__":
+    main()

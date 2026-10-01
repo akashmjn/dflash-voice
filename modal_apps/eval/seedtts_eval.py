@@ -1,39 +1,40 @@
 """Zero-shot TTS eval on Seed-TTS test-en, on Modal: Chatterbox TTS (AR).
 
-Follows ``scripts/run_eval.sh`` from resemble-ai/chatterbox-flash, cut to its
-stage 3. Three functions, so a failure in one does not re-pay for the others:
+Follows ``scripts/run_eval.sh`` from resemble-ai/chatterbox-flash broken into stages:
 
     download   CPU   eval datasets + scorers into the Volume
-    generate   GPU   ChatterboxTTS.generate -> one 24kHz wav per row
+    generate   GPU   ChatterboxTTS.generate -> one 24kHz wav per row, baseline
     upload     CPU   locally generated wavs into a run dir, in place of generate
     score      GPU   SIM-o (omnivoice) + WER (Whisper-large-v3) + UTMOS
+    fetch      local copy a run's scored/ logs into results/SPLIT/TAG/
 
-Scoring still uses chatterbox-flash's ``eval.wer_seedtts``, which is
-model-agnostic. Generation defaults are ``ChatterboxTTS.generate``'s own.
+A Modal Volume is used for input/output storage with the following layout:
 
-Per-run outputs on Volume ``seedtts-eval-09-2026``, keyed by ``--tag``;
-shared inputs sit under ``download/``::
-
+    download/            shared inputs
     eval-09-2026/seedtts_en-limit100/TAG/     (-limitN only for subset runs)
     ├── generated/       one 24kHz {id}.wav per row
     ├── scored/          sim.log / wer.log / mos.log
     └── test_list.jsonl  the row list this run used
 
-    modal run modal_apps/eval/cbox-ar-seedtts.py --limit 100 --tag TAG
-    modal run modal_apps/eval/cbox-ar-seedtts.py --tag full      # 1088 rows
-    modal run modal_apps/eval/cbox-ar-seedtts.py --stage score --tag TAG --limit 100
+``score`` is followed by ``fetch``, so scored runs land next to this file under
+``results/seedtts_en-limit100/TAG/`` for ``summarize.py``:
 
-Audio from another decoder is scored by the same path -- ``--stage upload``
-uploads a local wav dir (matched to rows by ``{id}.wav``) and then scores it::
+    modal run modal_apps/eval/seedtts_eval.py --limit 100 --tag TAG
+    modal run modal_apps/eval/seedtts_eval.py --tag full      # 1088 rows
+    modal run modal_apps/eval/seedtts_eval.py --stage score --tag TAG --limit 100
+    modal run modal_apps/eval/seedtts_eval.py --stage fetch --tag TAG --limit 100
 
-    modal run modal_apps/eval/cbox-ar-seedtts.py --stage upload --limit 100 \\
-        --tag 0917-mlx-cbox_ar_fp16 \\
-        --wav-dir agent-workspace/mlx_decode_output/seedtts-100/cbox-ar-fp16 \\
+Use `--stage upload` to score predecoded audio (e.g. locally generated via mlx_decode).
+
+    modal run modal_apps/eval/seedtts_eval.py --stage upload --limit 100 \\
+        --tag 0930-1800-TAG \\
+        --wav-dir agent-workspace/mlx_decode_output/seedtts-100/DECODE_SLUG \\
         --test-list data/seedtts/prompts/seedtts_test_en_100.jsonl
 """
 
 from __future__ import annotations
 
+import pathlib
 import time
 
 import modal
@@ -50,14 +51,17 @@ EVAL_MODEL_REPO = "k2-fsa/TTS_eval_models"
 
 # Must be named exactly "download": the k2-fsa JSONLs hard-code ref_audio under
 # that prefix, resolved against this dir's parent.
-VOL_ROOT = "/vol"
-DOWNLOAD_DIR = f"{VOL_ROOT}/download"
-REF_AUDIO_ROOT = VOL_ROOT
+MODAL_VOLUME_NAME = "seedtts-eval-09-2026"
+VOL_MOUNT_ROOT = "/vol"
+DOWNLOAD_DIR = f"{VOL_MOUNT_ROOT}/download"
+REF_AUDIO_ROOT = VOL_MOUNT_ROOT
 TTS_EVAL_DATA_DIR = f"{DOWNLOAD_DIR}/tts_eval_datasets"
 TTS_EVAL_MODEL_DIR = f"{DOWNLOAD_DIR}/tts_eval_models"
 # Row count scopes the dataset dir, so subsets never share a parent.
-RES_ROOT = f"{VOL_ROOT}/eval-09-2026"
+RES_ROOT = f"{VOL_MOUNT_ROOT}/eval-09-2026"
 DATASET = "seedtts_en"
+# Local mirror of each run's scored/ logs, read by summarize.py.
+LOCAL_RESULTS = pathlib.Path(__file__).parent / "results"
 
 TEST_JSONL = f"{TTS_EVAL_DATA_DIR}/seedtts_test_en.jsonl"
 
@@ -103,7 +107,7 @@ image = (
 app = modal.App("cbox-ar-seedtts-eval")
 
 # ~7.5GB: scorers + testset. Model weights live in the HF cache.
-vol = modal.Volume.from_name("seedtts-eval-09-2026", create_if_missing=True)
+vol = modal.Volume.from_name(MODAL_VOLUME_NAME, create_if_missing=True)
 
 
 def _run_paths(tag: str, limit: int = 0) -> dict:
@@ -111,6 +115,7 @@ def _run_paths(tag: str, limit: int = 0) -> dict:
     dataset_dir = f"{DATASET}-limit{limit}" if limit > 0 else DATASET
     run_dir = f"{RES_ROOT}/{dataset_dir}/{tag}"
     return {
+        "dataset_dir": dataset_dir,
         "run_dir": run_dir,
         "generated": f"{run_dir}/generated",
         "scored": f"{run_dir}/scored",
@@ -120,7 +125,7 @@ def _run_paths(tag: str, limit: int = 0) -> dict:
 
 @app.function(
     image=image,
-    volumes={VOL_ROOT: vol},
+    volumes={VOL_MOUNT_ROOT: vol},
     timeout=TIMEOUT_MINUTES * 60,
 )
 def upload(
@@ -152,7 +157,7 @@ def upload(
 
 @app.function(
     image=image,
-    volumes={VOL_ROOT: vol},
+    volumes={VOL_MOUNT_ROOT: vol},
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     timeout=TIMEOUT_MINUTES * 60,
 )
@@ -231,7 +236,7 @@ def download() -> dict:
 @app.function(
     image=image,
     gpu=DEFAULT_GPU,
-    volumes={VOL_ROOT: vol},
+    volumes={VOL_MOUNT_ROOT: vol},
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     timeout=TIMEOUT_MINUTES * 60,
 )
@@ -356,7 +361,7 @@ def generate(
 @app.function(
     image=image,
     gpu=DEFAULT_GPU,
-    volumes={VOL_ROOT: vol},
+    volumes={VOL_MOUNT_ROOT: vol},
     secrets=[modal.Secret.from_name(HF_SECRET_NAME)],
     timeout=TIMEOUT_MINUTES * 60,
 )
@@ -384,7 +389,7 @@ def score(tag: str = "seedtts_en", limit: int = 0, nj_per_gpu: int = 2) -> dict:
         # cwd: omnivoice's sim.py uses sample["ref_audio"] verbatim, so the
         # JSONL's "download/..." paths need the parent of download/ as cwd.
         proc = subprocess.run(cmd, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, cwd=VOL_ROOT)
+                              stderr=subprocess.STDOUT, text=True, cwd=VOL_MOUNT_ROOT)
         # --decode-path holds the scorer's per-utterance detail; keep it.
         with open(f"{log}.console", "w", encoding="utf-8") as fh:
             fh.write(proc.stdout)
@@ -455,11 +460,25 @@ def score(tag: str = "seedtts_en", limit: int = 0, nj_per_gpu: int = 2) -> dict:
     return results
 
 
+def fetch(tag: str, limit: int) -> pathlib.Path:
+    """Copy a run's scored/ logs off the Volume into results/SPLIT/TAG/."""
+    paths = _run_paths(tag, limit)
+    remote = paths["scored"].removeprefix(f"{VOL_MOUNT_ROOT}/")
+    local = LOCAL_RESULTS / paths["dataset_dir"] / tag
+    local.mkdir(parents=True, exist_ok=True)
+    entries = vol.listdir(remote)
+    for entry in entries:
+        name = entry.path.rsplit("/", 1)[-1]
+        (local / name).write_bytes(b"".join(vol.read_file(entry.path)))
+    print(f"fetched {len(entries)} files: {remote} -> {local}")
+    return local
+
+
 @app.local_entrypoint()
 def main(
     limit: int = 0,
     tag: str = "seedtts_en",
-    stage: str = "all",  # all | download | generate | score | upload
+    stage: str = "all",  # all | download | generate | score | upload | fetch
     temperature: float = 0.8,
     exaggeration: float = 0.5,
     wav_dir: str = "",
@@ -513,6 +532,9 @@ def main(
     if stage in ("all", "score", "upload"):
         print(">>> stage 3b: score")
         scores = score.with_options(timeout=timeout_min * 60).remote(tag=tag, limit=limit)
+
+    if stage in ("all", "score", "upload", "fetch"):
+        fetch(tag, limit)
 
     print("\n" + "=" * 52)
     print(f"  Chatterbox TTS (AR) / Seed-TTS test-en ({tag})")
