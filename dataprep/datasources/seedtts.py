@@ -23,9 +23,14 @@ REPO_ID = "k2-fsa/TTS_eval_datasets"
 PROMPTS_FILE = "seedtts_test_en.jsonl"
 TARBALL = "seedtts_testset.tar.gz"
 
-#: Members to extract. The archive also holds ``en/ground_truth_wavs`` (the
-#: reference renditions) and a ``zh`` half, neither of which the bench reads.
+#: The clip each row is conditioned on, shared across rows. The archive also
+#: holds a ``zh`` half, which nothing here reads.
 PROMPT_WAVS = "seedtts_testset/en/prompt_wavs/"
+
+#: The human recording of each row's target text, one per row and named by row
+#: id -- the "ground truth" row of the chatterbox-flash quality table, and the
+#: upper bound a scoring run compares generated audio against.
+GROUND_TRUTH_WAVS = "seedtts_testset/en/ground_truth_wavs/"
 
 DATASET_NAME = "seedtts"
 
@@ -48,13 +53,48 @@ def _ref_names(prompts_path: Path, limit: int | None) -> set[str] | None:
     return names
 
 
-def _wanted(members: Iterable[tarfile.TarInfo], keep: set[str] | None):
-    """Yield the prompt wavs to extract, ignoring the rest of the archive."""
+def _wanted(
+    members: Iterable[tarfile.TarInfo], prefix: str, keep: set[str] | None
+):
+    """Yield the members under ``prefix`` to extract, ignoring the rest."""
     for member in members:
-        if not member.isfile() or not member.name.startswith(PROMPT_WAVS):
+        if not member.isfile() or not member.name.startswith(prefix):
             continue
         if keep is None or Path(member.name).name in keep:
             yield member
+
+
+def _row_ids(prompts_path: Path, limit: int | None) -> list[str]:
+    """Row ids in file order, capped at ``limit``.
+
+    Ground truth is one wav per row named by id, and the bench writes its
+    output under the same name, so a split is just the first N ids.
+    """
+    ids = []
+    with prompts_path.open(encoding="utf-8") as handle:
+        for index, line in enumerate(handle):
+            if limit is not None and index >= limit:
+                break
+            ids.append(json.loads(line)["id"])
+    return ids
+
+
+def _extract(
+    tarball: str, audio_dir: Path, prefix: str, keep: set[str] | None
+) -> int:
+    """Extract matching members flat into ``audio_dir``, skipping what is there."""
+    extracted = 0
+    with tarfile.open(tarball, mode="r:gz") as archive:
+        for member in _wanted(archive, prefix, keep):
+            target = audio_dir / Path(member.name).name
+            if target.exists():
+                continue
+            source = archive.extractfile(member)
+            if source is None:
+                continue
+            target.write_bytes(source.read())
+            extracted += 1
+    return extracted
 
 
 def fetch_seedtts(
@@ -87,20 +127,50 @@ def fetch_seedtts(
     extracted = 0
     if missing:
         tarball = hf_hub_download(REPO_ID, TARBALL, repo_type="dataset", token=token)
-        with tarfile.open(tarball, mode="r:gz") as archive:
-            for member in _wanted(archive, keep):
-                target = audio_dir / Path(member.name).name
-                if target.exists():
-                    continue
-                source = archive.extractfile(member)
-                if source is None:
-                    continue
-                target.write_bytes(source.read())
-                extracted += 1
+        extracted = _extract(tarball, audio_dir, PROMPT_WAVS, keep)
 
     return {
         "prompts": prompts_path,
         "ref_audio": audio_dir,
         "extracted": extracted,
         "wavs": len(list(audio_dir.glob("*.wav"))),
+    }
+
+
+def fetch_ground_truth(
+    dest: Path, *, rows: int, token: str | None = None
+) -> dict[str, Any]:
+    """Download the human recordings for the first ``rows`` prompts.
+
+    Lands a self-contained ``seedtts-{rows}-ground_truth/`` holding one wav per
+    row, named by row id -- the same name the bench writes its generated audio
+    under, so a scoring run joins the two on filename alone.
+    """
+    from huggingface_hub import hf_hub_download
+
+    audio_dir = dest / f"seedtts-{rows}-ground_truth"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    prompts_path = dest / "prompts" / PROMPTS_FILE
+    if not prompts_path.exists():
+        cached = hf_hub_download(REPO_ID, PROMPTS_FILE, repo_type="dataset", token=token)
+        prompts_path.parent.mkdir(parents=True, exist_ok=True)
+        prompts_path.write_bytes(Path(cached).read_bytes())
+
+    ids = _row_ids(prompts_path, rows)
+    keep = {f"{row_id}.wav" for row_id in ids}
+    missing = [name for name in keep if not (audio_dir / name).exists()]
+
+    extracted = 0
+    if missing:
+        tarball = hf_hub_download(REPO_ID, TARBALL, repo_type="dataset", token=token)
+        extracted = _extract(tarball, audio_dir, GROUND_TRUTH_WAVS, keep)
+
+    present = sorted(p.name for p in audio_dir.glob("*.wav"))
+    return {
+        "ground_truth": audio_dir,
+        "requested": len(keep),
+        "extracted": extracted,
+        "wavs": len(present),
+        "missing": sorted(set(keep) - set(present)),
     }

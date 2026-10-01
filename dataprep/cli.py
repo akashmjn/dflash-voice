@@ -104,6 +104,12 @@ def fetch_command(
         "Rows reuse clips, so this is far fewer files than N",
     ),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
+    ground_truth: bool = typer.Option(
+        False,
+        "--ground-truth",
+        help="fetch the human recordings for --rows instead of the reference "
+        "clips as an oracle for scoring",
+    ),
 ) -> None:
     """Download an eval set for the decode bench, not for sharding.
 
@@ -118,12 +124,25 @@ def fetch_command(
     if rows is not None and rows < 1:
         raise typer.BadParameter("--rows requires a positive count")
 
-    from dataprep.datasources.seedtts import fetch_seedtts
-
     dest = data_root / dataset
     typer.echo(f"dataset    : {dataset}")
     typer.echo(f"destination: {dest}")
     typer.echo(f"prompts    : {rows if rows is not None else 'all'}")
+
+    if ground_truth:
+        if rows is None:
+            raise typer.BadParameter("--ground-truth needs --rows to size the split")
+        from dataprep.datasources.seedtts import fetch_ground_truth
+
+        gt = fetch_ground_truth(dest, rows=rows)
+        typer.echo(f"ground truth: {gt['ground_truth']}")
+        typer.echo(f"wavs        : {gt['wavs']} of {gt['requested']} requested")
+        typer.echo(f"extracted   : {gt['extracted']} new")
+        if gt["missing"]:
+            typer.echo(f"WARNING: {len(gt['missing'])} missing, e.g. {gt['missing'][:3]}")
+        return
+
+    from dataprep.datasources.seedtts import fetch_seedtts
 
     result = fetch_seedtts(dest, limit=rows)
 
