@@ -40,7 +40,7 @@ from dataprep.pipeline import (
 MODELS = ("miso", "chatterbox")
 DATASETS = ("emilia", "expresso")
 #: Fetched to disk rather than streamed, so these are not `--dataset` loaders.
-FETCH_DATASETS = ("seedtts",)
+FETCH_DATASETS = ("seedtts", "emergenttts")
 STAGES = ("tokenize", "featurize", "all")
 
 MODEL_HELP = "tokenizer backend: miso, chatterbox"
@@ -101,7 +101,8 @@ def fetch_command(
     rows: Optional[int] = typer.Option(
         None,
         help="only fetch the clips the first N prompts cite (default: all). "
-        "Rows reuse clips, so this is far fewer files than N",
+        "Rows reuse clips, so this is far fewer files than N. For emergenttts, "
+        "also writes a balanced first-N split",
     ),
     data_root: Path = typer.Option(DEFAULT_DATA_ROOT, help="dataset root"),
     ground_truth: bool = typer.Option(
@@ -128,6 +129,20 @@ def fetch_command(
     typer.echo(f"dataset    : {dataset}")
     typer.echo(f"destination: {dest}")
     typer.echo(f"prompts    : {rows if rows is not None else 'all'}")
+
+    if dataset == "emergenttts":
+        if ground_truth:
+            raise typer.BadParameter("emergenttts has no human recordings to fetch")
+        from dataprep.datasources.emergenttts import fetch_emergenttts
+
+        result = fetch_emergenttts(dest, limit=rows, seedtts_root=data_root / "seedtts")
+        for path in result["prompts"]:
+            typer.echo(f"prompts    : {path}")
+        typer.echo(f"rows       : {result['rows']} ({result['refs']} seed-tts voices)")
+        for category, count in result["by_category"].items():
+            typer.echo(f"  {category:22s}: {count}")
+        typer.echo("ref audio  : run `fetch --dataset seedtts` for the clips these cite")
+        return
 
     if ground_truth:
         if rows is None:
