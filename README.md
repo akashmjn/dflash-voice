@@ -1,15 +1,31 @@
 # Exploring efficient audio generation 
 
-Local inference of popular open-source TTS/omni models is bottlenecked (> 50%) by repeated forward passes of smaller models to generate audio tokens vs larger LLM-based backbones that handle semantics/prosody.
+This project contain code for two WIP explorations on speeding up local inference of open-weight TTS models.
+
+Most TTS/Omni-duplex models have two sub-models (1) a larger autoregressive `backbone` generating tokens corresponding to higher level semantics/prosody (2) a smaller `audio decoder`/vocoder enriching them into final raw audio with all its nuances (speaker, environment characteristics, etc).
+
+Both aspects are explored individually below.
+
+
+## Speeding up the semantic backbone: What does speculative decoding over audio sound like?
+
+> This contains code for an upcoming blog post to be linked here.
+
+As the semantic backbone sub-model (1) operates at a high framerate (12-25 tokens/s) - I explore how much speculative decoding can increase output tokens per step of decoding (acceptance length). As discretized audio tokens have different characteristics from sharper and less noisy text tokens, I try relaxing strict specdec acceptance criteria to look at the kind of acceptance lengths we see over audio tokens, and the impact on quality.
+
+This is done with a local MLX implementation running on an Apple Silicon laptop using the Resemble AI [Chatterbox](https://github.com/resemble-ai/chatterbox) TTS models.
+
+For an off-the-shelf draft/target pairing of a 100M (cbox-nano) and 500M (cbox-ar) model, we see that relaxed specdec allows us to smoothly interpolate between these two models trading off quality/speed, with surprisingly low impact to quality.
+
+
+## Speeding up the audio decoder: 2x Faster Voxtral-TTS via Meanflows distillation
+
+> This is WIP with in-flight sloppy experimental code on the `dev` branch
+
+The audio decoder sub-model (2) forms (>50%) of local inference time for a range of popular open-weight TTS models, even though it is a lot smaller than the backbone, due to repeated forward passes at inference.
 
 ![MLX decode breakdown chart](./experiments/mlx_decode_breakdown/assets/mlx-decode-breakdown.png)
 
-This project contains ongoing explorations on two directions to speed this up:
-1. Discrete: Speculative decoding over audio tokens on a single-codebook TTS model [Chatterbox](https://github.com/resemble-ai/chatterbox). We look at acceptance rates for various off-the-shelf target/draft pairings, and explore a principled way to relax acceptance criteria to handle nuances of audio tokens.
-2. Continuous: [MeanFlows](https://arxiv.org/abs/2505.13447) distillation of velocity fields from the [Voxtral TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) audio token flow decoder, reducing NFEs (number of function evaluations) from 14 to 2 for upto 2x faster local inference (ongoing).
-
-The exploration helps understand the critical role of audio tokenization in both. Only single-codebook FSQ models are straightforward to implement speculative decoding over, while MeanFlows only applies to models with flow-based decoders generating multiple FSQ codes. Models with multi-layer RVQ tokenizers can't be used with either. Ultimately, we see why continuous-based approaches are better positioned for local efficiency - as seen in [Pocket TTS](https://arxiv.org/abs/2509.06926).
-
-To reproduce the benchmark above, you will need an Apple Silicon laptop with MLX support. The `dev` branch contains work in progress on dataprep, finetuning models and other experiments under `experiments/`.
+I explore [MeanFlows](https://arxiv.org/abs/2505.13447) - a distillation technique for velocity fields in the continuous latent space. Working with Mistral AI's [Voxtral TTS](https://huggingface.co/mistralai/Voxtral-4B-TTS-2603) audio decoder, we aim to bring down NFEs (number of function evaluations) from 14 to 2 for upto 2x faster local inference.
 
 More to come here soon. Feel free to [connect/reach me](https://akashmjn.me/) if you've any thoughts!
